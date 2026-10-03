@@ -145,8 +145,33 @@ assert.match(await pc.textContent('#main'), /Due/);
 
 // Weekly review.
 await pc.keyboard.press('8');
-await pc.check('[data-step="loose"]');
 await shot(pc, '06-review');
+
+// Mind sweep: general card, then the project card files lines under the project.
+await pc.click('[data-action="sweep-start"]');
+assert.match(await pc.textContent('#main'), /What has been on your mind/);
+await pc.fill('#sweep-text', '- Renew passport\n\n* Ring dentist @phone');
+await pc.press('#sweep-text', 'Control+Enter');
+assert.match(await pc.textContent('#main'), /2 things captured/);
+while (!/Car serviced and MOT passed: what's unfinished/.test(await pc.textContent('#main .q'))) {
+  await pc.click('[data-action="sweep-next"]');
+}
+assert.match(await pc.textContent('#main .sweep-hints'), /Call garage to book service/, 'shows current next action');
+await pc.fill('#sweep-text', 'Find V5 logbook');
+await shot(pc, '06b-sweep-project');
+await pc.click('[data-action="sweep-next"]');
+await pc.click('[data-action="sweep-back"]');
+assert.match(await pc.textContent('#main .q'), /Car serviced/, 'back returns to the project card');
+await pc.click('[data-action="sweep-finish"]');
+assert.match(await pc.textContent('#main'), /3 things out of your head/);
+const swept = await pc.evaluate(() => Object.values(JSON.parse(localStorage.getItem('clearhead.doc.v1')).items)
+  .filter((i) => i.list === 'inbox' && !i.deleted).map((i) => ({ t: i.title, p: i.projectId, c: i.contexts })));
+assert.deepEqual(swept.map((x) => x.t).sort(), ['Find V5 logbook', 'Renew passport', 'Ring dentist']);
+assert.ok(swept.find((x) => x.t === 'Find V5 logbook').p, 'project line linked to project');
+assert.deepEqual(swept.find((x) => x.t === 'Ring dentist').c, ['phone']);
+await pc.click('[data-view="review"].btn');
+assert.ok(await pc.isChecked('[data-step="loose"]'), 'sweep ticks review step 1');
+assert.match(await pc.textContent('#main'), /Sweep again/);
 await pc.click('[data-action="review-finish"]');
 assert.doesNotMatch(await pc.textContent('#main'), /Weekly review is due/);
 
@@ -157,7 +182,7 @@ await pc.click('#sync-settings .btn.primary');
 await pc.waitForURL(BASE);
 await pc.waitForFunction(() => document.querySelector('#sync-dot')?.dataset.state === 'ok');
 assert.ok(dropbox.content, 'uploaded to dropbox');
-assert.equal(Object.values(JSON.parse(dropbox.content).items).filter((i) => !i.deleted).length, 3);
+assert.equal(Object.values(JSON.parse(dropbox.content).items).filter((i) => !i.deleted).length, 6);
 
 // ---------- Device B: Android phone ----------
 const phone = await device('phone', { width: 390, height: 844 });

@@ -4,6 +4,7 @@ import {
 } from './model.js';
 import { store, prefs } from './store.js';
 import { sync } from './sync.js';
+import { buildSweep, splitLines } from './sweep.js';
 
 // ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -68,7 +69,7 @@ const state = {
   process: null,
   editingId: null,
 };
-if (!VIEWS.some((v) => v.id === state.view) && state.view !== 'more') state.view = 'now';
+if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep'].includes(state.view)) state.view = 'now';
 
 function go(view, extra = {}) {
   Object.assign(state, { view, ...extra });
@@ -293,7 +294,14 @@ views.upcoming = () => {
 };
 
 const REVIEW_STEPS = [
-  { id: 'loose', title: 'Collect loose ends', body: 'Empty your head, desk, notebooks, downloads, messages and email into the inbox. Use the capture bar.' },
+  { id: 'loose', title: 'Mind sweep: collect loose ends', body: () => {
+    const sw = sweepGet(reviewStatus(doc(), today()).periodStart);
+    if (sw.finished) return `Done: ${plural(sw.captured, 'thing')} captured. Re-run it any time something else surfaces.`;
+    return 'Guiding questions, one at a time, to get every open loop out of your head: life areas plus each of your projects.';
+  }, action: () => {
+    const sw = sweepGet(reviewStatus(doc(), today()).periodStart);
+    return ['sweep-start', sw.finished ? 'Sweep again' : sw.id ? 'Resume mind sweep' : 'Start mind sweep'];
+  } },
   { id: 'inbox', title: 'Process inbox to zero', body: () => `${plural(inboxItems(doc()).length, 'item')} in inbox.`, action: ['process-start', 'Process inbox'] },
   { id: 'calendar', title: 'Review your calendar', body: 'Look back 1 week for follow-ups, ahead 2 weeks for preparation. Capture anything it triggers.' },
   { id: 'next', title: 'Review next actions', body: () => `${plural(nextActions(doc(), today()).length, 'action')}. Tick off done ones, delete stale ones, sharpen vague ones.`, view: 'next' },
@@ -316,7 +324,7 @@ views.review = () => {
     <ol class="review-steps">${REVIEW_STEPS.map((s) => `<li class="${checks[s.id] ? 'checked' : ''}">
       <label class="review-check"><input type="checkbox" data-action="review-check" data-step="${s.id}" ${checks[s.id] ? 'checked' : ''}><span class="task-title">${s.title}</span></label>
       <p>${typeof s.body === 'function' ? s.body() : s.body}</p>
-      ${s.action ? `<button class="btn small" data-action="${s.action[0]}">${s.action[1]}</button>` : ''}
+      ${s.action ? (([a, label]) => `<button class="btn small" data-action="${a}">${label}</button>`)(typeof s.action === 'function' ? s.action() : s.action) : ''}
       ${s.view ? `<button class="btn small" data-action="nav" data-view="${s.view}">Open</button>` : ''}
     </li>`).join('')}</ol>
     <button class="btn primary big" data-action="review-finish">${rs.due ? 'Finish weekly review' : 'Log another review'}</button>`;
@@ -325,6 +333,69 @@ views.review = () => {
 function reviewChecks(periodStart) {
   const saved = prefs.get('reviewChecks', { period: null, done: {} });
   return saved.period === periodStart ? saved.done : {};
+}
+
+// ---------- mind sweep (weekly review step 1) ----------
+// Progress is per device and per review period, so it can be paused and resumed.
+function sweepGet(period) {
+  const s = prefs.get('sweep', null);
+  return s && s.period === period ? s : { period, id: null, captured: 0, finished: false };
+}
+
+function sweepContext() {
+  const period = reviewStatus(doc(), today()).periodStart;
+  const sw = sweepGet(period);
+  const cards = buildSweep(doc(), today());
+  const i = Math.max(0, cards.findIndex((c) => c.id === sw.id));
+  return { sw, cards, i };
+}
+
+views.sweep = () => {
+  const { sw, cards, i } = sweepContext();
+  if (sw.finished) {
+    const inbox = inboxItems(doc()).length;
+    return `${header('Mind sweep')}
+      <div class="wizard done-card"><p class="big-emoji">✓</p>
+        <p><strong>${plural(sw.captured, 'thing')} out of your head.</strong> Nothing to remember now: it's all in the inbox.</p>
+        <div class="row center">${inbox ? `<button class="btn primary" data-action="process-start">Process inbox (${inbox})</button>` : ''}
+        <button class="btn" data-action="nav" data-view="review">Back to review</button></div></div>`;
+  }
+  const c = cards[i];
+  return `${header('Mind sweep', 'Write down everything each question brings up, one line each. Don\'t judge or organise yet; that comes when you process the inbox.')}
+    <progress class="sweep-progress" max="${cards.length}" value="${i}" aria-label="Mind sweep progress"></progress>
+    <p class="sweep-meta"><span>Question ${i + 1} of ${cards.length}</span><span>${plural(sw.captured, 'thing')} captured</span></p>
+    <div class="wizard sweep-card">
+      <span class="label">${esc(c.area)}${c.stalled ? ' · <span class="bad-text">no next action</span>' : ''}</span>
+      <h2 class="q">${esc(c.q)}</h2>
+      <ul class="sweep-hints">${c.hints.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>
+      <label class="sr-only" for="sweep-text">Your answers, one per line</label>
+      <textarea id="sweep-text" rows="5" placeholder="One per line…${c.projectId ? ' (filed under this project)' : ''}" autofocus></textarea>
+      <p class="hint">Each line becomes an inbox item. Shorthand works (@phone ~15m due:fri).<span class="desktop-only"> <kbd>Ctrl</kbd>+<kbd>Enter</kbd> for next.</span></p>
+      <div class="choices"><button class="btn primary" data-action="sweep-next">${i + 1 < cards.length ? 'Next question →' : 'Finish sweep'}</button></div>
+      <div class="wizard-nav">${i > 0 ? '<button class="link" data-action="sweep-back">← Back</button>' : '<span></span>'}
+        <span><button class="link" data-action="sweep-finish">Finish now</button> · <button class="link" data-action="nav" data-view="review">Pause</button></span></div>
+    </div>`;
+};
+
+// Captures whatever is typed on the current card, then moves by `delta` cards (or finishes).
+function sweepMove(delta, { finish = false } = {}) {
+  const { sw, cards, i } = sweepContext();
+  const card = cards[i];
+  const lines = splitLines($('#sweep-text')?.value);
+  for (const line of lines) capture(line, '', { projectId: card.projectId || null });
+  sw.captured += lines.length;
+  const to = i + delta;
+  if (finish || to >= cards.length) {
+    sw.finished = true;
+    const rs = reviewStatus(doc(), today());
+    prefs.set('reviewChecks', { period: rs.periodStart, done: { ...reviewChecks(rs.periodStart), loose: true } });
+  } else {
+    sw.id = cards[Math.max(0, to)].id;
+  }
+  prefs.set('sweep', sw);
+  if (lines.length) toast(`${plural(lines.length, 'item')} added to Inbox`);
+  render();
+  window.scrollTo(0, 0);
 }
 
 views.done = () => {
@@ -584,10 +655,10 @@ function capturePreview() {
   $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('');
 }
 
-function capture(text, notes = '') {
+function capture(text, notes = '', { projectId: defaultProject = null } = {}) {
   const p = parseCapture(text, today());
   if (!p.title) return null;
-  const projectId = p.project ? store.findOrCreateProject(p.project).id : null;
+  const projectId = p.project ? store.findOrCreateProject(p.project).id : defaultProject;
   return store.addItem({
     title: p.title, notes, contexts: p.contexts, projectId, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start,
   });
@@ -621,7 +692,7 @@ function render() {
     waiting: openItems(d).filter((i) => i.list === 'waiting').length,
     review: reviewStatus(d, t).due ? '!' : '',
   };
-  const navView = state.view === 'project' ? 'projects' : state.view;
+  const navView = { project: 'projects', sweep: 'review' }[state.view] || state.view;
   $('#sidenav').innerHTML = VIEWS.map((v) => `<button class="${navView === v.id ? 'active' : ''}" data-action="nav" data-view="${v.id}" title="${v.label} (${v.key})">
       ${icon(v.id)}<span>${v.label}</span>${counts[v.id] ? `<span class="badge ${v.id === 'projects' || v.id === 'review' ? 'warn' : ''}">${counts[v.id]}</span>` : ''}</button>`).join('');
   const moreActive = !MOBILE_TABS.includes(navView);
@@ -702,9 +773,18 @@ const actions = {
   },
   'p-time': (el) => { readDraft(); const m = Number(el.dataset.min); state.process.draft.timeMin = state.process.draft.timeMin === m ? null : m; render(); },
   'p-energy': (el) => { readDraft(); const e = el.dataset.energy; state.process.draft.energy = state.process.draft.energy === e ? null : e; render(); },
+  'sweep-start': () => {
+    const period = reviewStatus(doc(), today()).periodStart;
+    if (sweepGet(period).finished) prefs.set('sweep', { period, id: null, captured: 0, finished: false });
+    go('sweep');
+  },
+  'sweep-next': () => sweepMove(1),
+  'sweep-back': () => sweepMove(-1),
+  'sweep-finish': () => sweepMove(0, { finish: true }),
   'review-finish': () => {
     store.completeReview(today());
     prefs.set('reviewChecks', null);
+    prefs.set('sweep', null);
     toast('Weekly review logged. Your system is current.');
     go('now');
   },
@@ -843,6 +923,7 @@ document.addEventListener('focusout', () => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'sweep-text' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sweepMove(1); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (e.key === 'Escape' && e.target.id === 'capture-input') { e.target.blur(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey || $('#editor').open) return;

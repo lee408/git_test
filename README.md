@@ -10,6 +10,7 @@ It's designed around four ways task systems usually fail:
 | **Overwhelm** | The **Now** screen asks where you are, how much time you have and your energy, then shows the ~5 best-fitting actions only. Starred ("focus") and overdue items rise to the top. Everything else stays out of sight. |
 | **Vague tasks** | **Process inbox** walks each item through the GTD clarify questions: actionable? project? next physical action? under 2 minutes? delegate? Wording like "sort out…", "look into…" or a bare topic ("Taxes") gets a nudge to rewrite it as a concrete action. Projects without a next action are flagged as **stalled**. |
 | **Skipping reviews** | From your review day (Monday by default) a banner stays on the Now screen until you finish the **guided weekly review**. That's a 9-step checklist with live counts (inbox, stalled projects, stale waiting-fors) and a week streak. |
+| **Hidden open loops** | The review starts with a **mind sweep**: one guiding question at a time. It covers what's on your mind, the calendar behind and ahead, each active project (showing its outcome, current next action and who you're waiting on), and then work, home and admin, and people and personal. Type one line per thing. Each line goes to the Inbox, and lines under a project card are linked to that project. You can pause and resume it.
 
 ## Lists
 
@@ -88,6 +89,7 @@ How sync works:
 ```
 app/index.html, styles.css        UI shell
 app/js/model.js                   GTD logic: capture parsing, Now ranking, review, merge
+app/js/sweep.js                   weekly-review mind sweep questions
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync
 app/js/app.js                     views, clarify wizard, weekly review, shortcuts
