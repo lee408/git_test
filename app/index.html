@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Clearhead</title>
+  <meta name="description" content="A personal Getting Things Done system: capture, clarify, organise, review, engage.">
+  <meta name="theme-color" content="#2f6f5e">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><img src="icons/icon.svg" alt="" width="28" height="28"> Clearhead</div>
+      <nav id="sidenav" aria-label="Lists"></nav>
+    </aside>
+    <div class="content">
+      <form id="capture" class="capture" autocomplete="off">
+        <input id="capture-input" enterkeyhint="done" placeholder="Capture anything… (press N)" aria-label="Capture to inbox">
+        <button class="btn primary" aria-label="Add to inbox">Add</button>
+        <button type="button" id="sync-dot" class="sync-dot" data-action="nav" data-view="settings" hidden aria-label="Sync status"></button>
+        <div id="capture-preview" class="capture-preview" aria-live="polite"></div>
+      </form>
+      <main id="main" tabindex="-1"></main>
+    </div>
+  </div>
+  <nav id="tabbar" class="tabbar" aria-label="Main"></nav>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="editor" aria-label="Edit action"><form id="editor-form" method="dialog"></form></dialog>
+  <noscript>Clearhead needs JavaScript.</noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

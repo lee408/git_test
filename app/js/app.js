@@ -1,0 +1,901 @@
+import {
+  isoDay, addDays, daysBetween, parseCapture, vagueHint, live, openItems, inboxItems, nextActions,
+  projectHealth, suggestNow, reviewStatus, isAvailable, normalizeDoc,
+} from './model.js';
+import { store, prefs } from './store.js';
+import { sync } from './sync.js';
+
+// ---------- helpers ----------
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
+const today = () => isoDay(new Date());
+const doc = () => store.doc;
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const TIME_CHOICES = [5, 15, 30, 60, 120];
+const NOW_LIMIT = 5;
+
+function fmtDay(s) {
+  const d = daysBetween(today(), s);
+  if (d === 0) return 'Today';
+  if (d === 1) return 'Tomorrow';
+  if (d === -1) return 'Yesterday';
+  const date = new Date(s + 'T00:00');
+  if (d > 1 && d < 7) return date.toLocaleDateString(undefined, { weekday: 'long' });
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+const fmtMin = (m) => (m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? m % 60 + 'm' : ''}` : `${m}m`);
+
+const ICONS = {
+  now: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  inbox: '<path d="M3 13h5l2 3h4l2-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/>',
+  next: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="m3 6 1.5 1.5L7 5M3 12l1.5 1.5L7 11M3 18l1.5 1.5L7 17"/>',
+  projects: '<path d="M3 6h6l2 2h10v11H3z"/>',
+  waiting: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  someday: '<path d="M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3zM9 21h6"/>',
+  upcoming: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  review: '<path d="M4 12a8 8 0 1 0 3-6.2"/><path d="M4 4v4h4"/><path d="m9 12 2 2 4-4"/>',
+  done: '<path d="m5 12 5 5L20 7"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  more: '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
+  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/>',
+};
+const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+
+const VIEWS = [
+  { id: 'now', label: 'Now', key: '1' },
+  { id: 'inbox', label: 'Inbox', key: '2' },
+  { id: 'next', label: 'Next actions', key: '3' },
+  { id: 'projects', label: 'Projects', key: '4' },
+  { id: 'waiting', label: 'Waiting for', key: '5' },
+  { id: 'someday', label: 'Someday / Maybe', key: '6' },
+  { id: 'upcoming', label: 'Upcoming', key: '7' },
+  { id: 'review', label: 'Weekly review', key: '8' },
+  { id: 'done', label: 'Done', key: '9' },
+  { id: 'settings', label: 'Settings', key: '0' },
+];
+const MOBILE_TABS = ['now', 'inbox', 'next', 'projects', 'more'];
+
+// ---------- UI state (per device) ----------
+const state = {
+  view: prefs.get('view', 'now'),
+  projectId: null,
+  now: prefs.get('nowCtx', { contexts: [], timeMin: null, energy: null }),
+  showAllNow: false,
+  nextFilter: prefs.get('nextFilter', null),
+  process: null,
+  editingId: null,
+};
+if (!VIEWS.some((v) => v.id === state.view) && state.view !== 'more') state.view = 'now';
+
+function go(view, extra = {}) {
+  Object.assign(state, { view, ...extra });
+  if (view !== 'project') prefs.set('view', view);
+  if (view !== 'inbox') state.process = null;
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ---------- shared templates ----------
+function chips(i, { project = true } = {}) {
+  const t = today();
+  const out = [];
+  if (i.due) {
+    const d = daysBetween(t, i.due);
+    const cls = d < 0 ? 'bad' : d === 0 ? 'warn' : '';
+    out.push(`<span class="chip ${cls}">Due ${esc(fmtDay(i.due))}</span>`);
+  }
+  if (i.start && i.start > t) out.push(`<span class="chip">Starts ${esc(fmtDay(i.start))}</span>`);
+  for (const c of i.contexts || []) out.push(`<span class="chip ctx">@${esc(c)}</span>`);
+  if (project && i.projectId && doc().projects[i.projectId] && !doc().projects[i.projectId].deleted) {
+    out.push(`<button class="chip proj" data-action="open-project" data-pid="${i.projectId}">${esc(doc().projects[i.projectId].title)}</button>`);
+  }
+  if (i.timeMin) out.push(`<span class="chip">${fmtMin(i.timeMin)}</span>`);
+  if (i.energy) out.push(`<span class="chip energy-${i.energy}">${i.energy} energy</span>`);
+  if (i.list === 'waiting' && i.waitingOn) {
+    const days = Math.floor((Date.now() - (i.waitingSince || i.createdAt)) / 86400000);
+    out.push(`<span class="chip ${days >= 7 ? 'warn' : ''}">${esc(i.waitingOn)} · ${days}d</span>`);
+  }
+  return out.length ? `<div class="chips">${out.join('')}</div>` : '';
+}
+
+function taskRow(i, opts = {}) {
+  return `<li class="task ${i.done ? 'is-done' : ''}" data-id="${i.id}">
+    <button class="check" data-action="toggle-done" aria-label="${i.done ? 'Mark not done' : 'Mark done'}"></button>
+    <button class="task-body" data-action="edit">
+      <span class="task-title">${esc(i.title) || '<em>Untitled</em>'}</span>
+      ${i.notes ? `<span class="task-notes">${esc(i.notes.split('\n')[0])}</span>` : ''}
+    </button>
+    ${chips(i, opts)}
+    ${opts.extra || ''}
+    <button class="star ${i.focus ? 'on' : ''}" data-action="toggle-focus" aria-label="Focus" title="Focus: always show first">${icon('star')}</button>
+  </li>`;
+}
+
+const taskList = (items, opts) => (items.length ? `<ul class="tasks">${items.map((i) => taskRow(i, opts)).join('')}</ul>` : '');
+const empty = (msg) => `<p class="empty">${msg}</p>`;
+
+function header(title, sub = '', actions = '') {
+  return `<header class="view-head"><div><h1>${title}</h1>${sub ? `<p class="sub">${sub}</p>` : ''}</div>${actions}</header>`;
+}
+
+function banners() {
+  const out = [];
+  const inbox = inboxItems(doc()).length;
+  const rs = reviewStatus(doc(), today());
+  if (rs.due) {
+    const when = rs.daysLate === 0 ? 'today' : `${plural(rs.daysLate, 'day')} overdue`;
+    out.push(`<div class="banner review"><span><strong>Weekly review is due</strong> (${when}). 30 minutes now keeps the whole system trustworthy.</span>
+      <button class="btn primary" data-action="nav" data-view="review">Start review</button></div>`);
+  }
+  if (inbox > 0) {
+    out.push(`<div class="banner"><span><strong>${plural(inbox, 'item')}</strong> in your inbox to clarify.</span>
+      <button class="btn" data-action="process-start">Process</button></div>`);
+  }
+  return out.join('');
+}
+
+// ---------- views ----------
+const views = {};
+
+views.now = () => {
+  const d = doc();
+  const t = today();
+  const ctxs = d.settings.contexts;
+  const suggestions = suggestNow(d, t, state.now);
+  const shown = state.showAllNow ? suggestions : suggestions.slice(0, NOW_LIMIT);
+  const hidden = suggestions.length - shown.length;
+  const overdueWaiting = openItems(d).filter((i) => i.list === 'waiting' && Date.now() - (i.waitingSince || i.createdAt) > 7 * 86400000).length;
+  const tog = (on) => (on ? 'on' : '');
+  return `${header('What now?', 'Pick where you are, how much time and energy you have. Only the best few actions are shown.')}
+    ${banners()}
+    <section class="filters" aria-label="Current situation">
+      <div class="filter-row"><span class="filter-label">Where / mode</span>
+        ${ctxs.map((c) => `<button class="pill ${tog(state.now.contexts.includes(c))}" data-action="now-ctx" data-ctx="${esc(c)}">@${esc(c)}</button>`).join('')}
+      </div>
+      <div class="filter-row"><span class="filter-label">Time</span>
+        ${TIME_CHOICES.map((m) => `<button class="pill ${tog(state.now.timeMin === m)}" data-action="now-time" data-min="${m}">${fmtMin(m)}</button>`).join('')}
+      </div>
+      <div class="filter-row"><span class="filter-label">Energy</span>
+        ${['low', 'med', 'high'].map((e) => `<button class="pill ${tog(state.now.energy === e)}" data-action="now-energy" data-energy="${e}">${e}</button>`).join('')}
+        ${state.now.contexts.length || state.now.timeMin || state.now.energy ? '<button class="link" data-action="now-clear">Clear</button>' : ''}
+      </div>
+    </section>
+    ${shown.length ? taskList(shown) : empty(nextActions(d, t).length
+    ? 'Nothing fits right now. Try a different context, or more time or energy.'
+    : 'No next actions yet. Capture something above, then process your inbox.')}
+    ${hidden > 0 ? `<button class="link more" data-action="now-all">Show ${hidden} more that also fit</button>` : ''}
+    ${state.showAllNow && suggestions.length > NOW_LIMIT ? '<button class="link more" data-action="now-all">Show fewer</button>' : ''}
+    ${overdueWaiting ? `<p class="hint">${plural(overdueWaiting, 'item')} waiting more than a week. <button class="link" data-action="nav" data-view="waiting">Follow up?</button></p>` : ''}`;
+};
+
+views.inbox = () => {
+  if (state.process) return processView();
+  const items = inboxItems(doc());
+  return `${header('Inbox', 'Capture now, decide later. Process to zero at least once a day.',
+    items.length ? '<button class="btn primary" data-action="process-start">Process inbox</button>' : '')}
+    ${items.length ? taskList(items) : empty('Inbox zero. Your head is clear.')}`;
+};
+
+views.next = () => {
+  const d = doc();
+  const t = today();
+  const all = nextActions(d, t);
+  const deferred = nextActions(d, t, { includeDeferred: true }).length - all.length;
+  const f = state.nextFilter;
+  const items = f ? all.filter((i) => (f === '_none' ? !i.contexts?.length : i.contexts?.includes(f))) : all;
+  const groups = new Map();
+  for (const c of d.settings.contexts) groups.set(c, []);
+  groups.set('_none', []);
+  for (const i of items) {
+    const key = i.contexts?.find((c) => groups.has(c)) || (i.contexts?.[0] ?? '_none');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  }
+  const sortItems = (arr) => arr.sort((a, b) => (b.focus - a.focus) || ((a.due || '9') < (b.due || '9') ? -1 : 1) || a.createdAt - b.createdAt);
+  return `${header('Next actions', `${plural(all.length, 'action')} you could do now${deferred ? `, plus ${deferred} scheduled for later` : ''}.`)}
+    <div class="filter-row">
+      <button class="pill ${!f ? 'on' : ''}" data-action="next-filter" data-ctx="">All</button>
+      ${d.settings.contexts.map((c) => `<button class="pill ${f === c ? 'on' : ''}" data-action="next-filter" data-ctx="${esc(c)}">@${esc(c)}</button>`).join('')}
+      <button class="pill ${f === '_none' ? 'on' : ''}" data-action="next-filter" data-ctx="_none">No context</button>
+    </div>
+    ${[...groups].filter(([, arr]) => arr.length).map(([c, arr]) => `<h2 class="group">${c === '_none' ? 'Anywhere' : '@' + esc(c)} <span class="count">${arr.length}</span></h2>${taskList(sortItems(arr))}`).join('')
+    || empty('No next actions here.')}`;
+};
+
+views.projects = () => {
+  const d = doc();
+  const t = today();
+  const ps = live(d.projects);
+  const active = ps.filter((p) => p.status === 'active').map((p) => ({ p, h: projectHealth(d, p, t) }))
+    .sort((a, b) => (b.h.stalled - a.h.stalled) || a.p.title.localeCompare(b.p.title));
+  const someday = ps.filter((p) => p.status === 'someday');
+  const done = ps.filter((p) => p.status === 'done').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20);
+  const stalled = active.filter((x) => x.h.stalled).length;
+  const card = ({ p, h }) => `<li class="project ${h.stalled ? 'stalled' : ''}">
+      <button class="project-main" data-action="open-project" data-pid="${p.id}">
+        <span class="task-title">${esc(p.title)}</span>
+        ${p.outcome ? `<span class="task-notes">${esc(p.outcome)}</span>` : ''}
+        <span class="chips">${h.stalled ? '<span class="chip bad">No next action</span>' : ''}
+          ${h.available.length ? `<span class="chip">${plural(h.available.length, 'next action')}</span>` : ''}
+          ${h.waiting.length ? `<span class="chip">${h.waiting.length} waiting</span>` : ''}</span>
+      </button>
+      ${h.stalled ? `<form class="inline-add" data-form="project-action" data-pid="${p.id}"><input name="title" placeholder="Next action to move this forward…" aria-label="Next action for ${esc(p.title)}"><button class="btn">Add</button></form>` : ''}
+    </li>`;
+  return `${header('Projects', `Any outcome needing more than one action. ${stalled ? `<strong class="bad-text">${plural(stalled, 'project')} stalled</strong>: every active project needs a next action.` : 'All active projects have a next action.'}`)}
+    <form class="inline-add" data-form="new-project"><input name="title" placeholder="New project: describe the outcome, e.g. 'Kitchen tap fixed'" aria-label="New project"><button class="btn primary">Add project</button></form>
+    ${active.length ? `<ul class="projects">${active.map(card).join('')}</ul>` : empty('No active projects.')}
+    ${someday.length ? `<details><summary>Someday projects (${someday.length})</summary><ul class="projects">${someday.map((p) => card({ p, h: projectHealth(d, p, t) })).join('')}</ul></details>` : ''}
+    ${done.length ? `<details><summary>Completed projects</summary><ul class="projects">${done.map((p) => card({ p, h: projectHealth(d, p, t) })).join('')}</ul></details>` : ''}`;
+};
+
+views.project = () => {
+  const d = doc();
+  const p = d.projects[state.projectId];
+  if (!p || p.deleted) { state.view = 'projects'; return views.projects(); }
+  const h = projectHealth(d, p, today());
+  const doneItems = live(d.items).filter((i) => i.projectId === p.id && i.done).sort((a, b) => b.completedAt - a.completedAt);
+  const other = h.actions.filter((i) => i.list !== 'next' && i.list !== 'waiting');
+  return `<button class="link back" data-action="nav" data-view="projects">← Projects</button>
+    <form class="project-edit" data-form="project-edit" data-pid="${p.id}">
+      <input class="title-input" name="title" value="${esc(p.title)}" aria-label="Project name">
+      <label>Outcome: what does "done" look like?<textarea name="outcome" rows="2">${esc(p.outcome)}</textarea></label>
+      <label>Notes / support material<textarea name="notes" rows="3">${esc(p.notes)}</textarea></label>
+      <div class="row"><button class="btn">Save</button>
+        ${p.status !== 'done' ? `<button type="button" class="btn" data-action="project-status" data-status="done">Complete project</button>` : `<button type="button" class="btn" data-action="project-status" data-status="active">Reopen</button>`}
+        ${p.status === 'active' ? `<button type="button" class="btn" data-action="project-status" data-status="someday">Move to Someday</button>` : ''}
+        ${p.status === 'someday' ? `<button type="button" class="btn" data-action="project-status" data-status="active">Activate</button>` : ''}
+        <button type="button" class="btn danger" data-action="project-delete">Delete</button></div>
+    </form>
+    ${h.stalled ? '<div class="banner bad"><span>This project has no next action, so it will never move. Add one below.</span></div>' : ''}
+    <form class="inline-add" data-form="project-action" data-pid="${p.id}"><input name="title" placeholder="Add next action (shorthand works: @phone ~15m due:fri)" aria-label="Add action"><button class="btn primary">Add</button></form>
+    ${h.nexts.length ? `<h2 class="group">Next actions</h2>${taskList(h.nexts, { project: false })}` : ''}
+    ${h.waiting.length ? `<h2 class="group">Waiting for</h2>${taskList(h.waiting, { project: false })}` : ''}
+    ${other.length ? `<h2 class="group">Other</h2>${taskList(other, { project: false })}` : ''}
+    ${doneItems.length ? `<details><summary>Done (${doneItems.length})</summary>${taskList(doneItems, { project: false })}</details>` : ''}`;
+};
+
+views.waiting = () => {
+  const items = openItems(doc()).filter((i) => i.list === 'waiting').sort((a, b) => (a.waitingSince || a.createdAt) - (b.waitingSince || b.createdAt));
+  const stale = (i) => Date.now() - (i.waitingSince || i.createdAt) > 7 * 86400000;
+  const nudge = (i) => (stale(i) ? '<button class="btn small" data-action="follow-up">Follow up</button>' : '');
+  return `${header('Waiting for', 'Things you delegated or are expecting. Chase anything older than a week.')}
+    ${items.length ? `<ul class="tasks">${items.map((i) => taskRow(i, { extra: nudge(i) })).join('')}</ul>` : empty('Not waiting on anyone.')}`;
+};
+
+views.someday = () => {
+  const d = doc();
+  const items = openItems(d).filter((i) => i.list === 'someday').sort((a, b) => a.createdAt - b.createdAt);
+  const refs = openItems(d).filter((i) => i.list === 'reference');
+  const projects = live(d.projects).filter((p) => p.status === 'someday');
+  const act = (i) => `<button class="btn small" data-action="activate" data-id="${i.id}">Make next action</button>`;
+  return `${header('Someday / Maybe', 'Ideas parked without guilt. Look through them in every weekly review.')}
+    ${items.length ? `<ul class="tasks">${items.map((i) => taskRow(i, { extra: act(i) })).join('')}</ul>` : empty('Nothing parked.')}
+    ${projects.length ? `<h2 class="group">Someday projects</h2><ul class="projects">${projects.map((p) => `<li class="project"><button class="project-main" data-action="open-project" data-pid="${p.id}"><span class="task-title">${esc(p.title)}</span></button></li>`).join('')}</ul>` : ''}
+    ${refs.length ? `<h2 class="group">Reference</h2>${taskList(refs)}` : ''}`;
+};
+
+views.upcoming = () => {
+  const t = today();
+  const items = openItems(doc()).filter((i) => i.due || (i.start && i.start > t));
+  const byDay = new Map();
+  for (const i of items) {
+    const key = i.start && i.start > t && (!i.due || i.start < i.due) ? i.start : i.due;
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(i);
+  }
+  const days = [...byDay.keys()].sort();
+  return `${header('Upcoming', 'Deadlines and things scheduled to come back (the "tickler"). Keep appointments in your calendar.')}
+    ${days.map((k) => `<h2 class="group ${k < t ? 'bad-text' : ''}">${esc(fmtDay(k))} <span class="count">${esc(k)}</span></h2>${taskList(byDay.get(k))}`).join('')
+    || empty('Nothing dated. That\'s fine. GTD only uses dates for real deadlines.')}`;
+};
+
+const REVIEW_STEPS = [
+  { id: 'loose', title: 'Collect loose ends', body: 'Empty your head, desk, notebooks, downloads, messages and email into the inbox. Use the capture bar.' },
+  { id: 'inbox', title: 'Process inbox to zero', body: () => `${plural(inboxItems(doc()).length, 'item')} in inbox.`, action: ['process-start', 'Process inbox'] },
+  { id: 'calendar', title: 'Review your calendar', body: 'Look back 1 week for follow-ups, ahead 2 weeks for preparation. Capture anything it triggers.' },
+  { id: 'next', title: 'Review next actions', body: () => `${plural(nextActions(doc(), today()).length, 'action')}. Tick off done ones, delete stale ones, sharpen vague ones.`, view: 'next' },
+  { id: 'projects', title: 'Review projects', body: () => { const s = live(doc().projects).filter((p) => projectHealth(doc(), p, today()).stalled).length; return s ? `<strong class="bad-text">${plural(s, 'project')} have no next action.</strong> Fix those.` : 'Every active project has a next action.'; }, view: 'projects' },
+  { id: 'waiting', title: 'Review waiting for', body: () => `${plural(openItems(doc()).filter((i) => i.list === 'waiting').length, 'item')}. Chase anything overdue.`, view: 'waiting' },
+  { id: 'upcoming', title: 'Check upcoming deadlines', body: 'Anything due in the next 2 weeks that needs a next action now?', view: 'upcoming' },
+  { id: 'someday', title: 'Review someday / maybe', body: 'Activate anything that\'s now a priority; delete what no longer excites you.', view: 'someday' },
+  { id: 'creative', title: 'Get creative', body: 'Any new ideas, projects or bold moves? Capture them.' },
+];
+
+views.review = () => {
+  const rs = reviewStatus(doc(), today());
+  const checks = reviewChecks(rs.periodStart);
+  const doneCount = REVIEW_STEPS.filter((s) => checks[s.id]).length;
+  const dayName = WEEKDAY_NAMES[doc().settings.reviewDay ?? 1];
+  return `${header('Weekly review', rs.due
+    ? `Due since ${esc(fmtDay(rs.periodStart))}. Work through the steps below, top to bottom.`
+    : `Done for this week (${esc(fmtDay(rs.last))}). Next one: ${dayName}.`)}
+    <div class="review-stats"><span class="stat"><strong>${rs.streak}</strong> week streak</span><span class="stat"><strong>${doneCount}/${REVIEW_STEPS.length}</strong> steps</span></div>
+    <ol class="review-steps">${REVIEW_STEPS.map((s) => `<li class="${checks[s.id] ? 'checked' : ''}">
+      <label class="review-check"><input type="checkbox" data-action="review-check" data-step="${s.id}" ${checks[s.id] ? 'checked' : ''}><span class="task-title">${s.title}</span></label>
+      <p>${typeof s.body === 'function' ? s.body() : s.body}</p>
+      ${s.action ? `<button class="btn small" data-action="${s.action[0]}">${s.action[1]}</button>` : ''}
+      ${s.view ? `<button class="btn small" data-action="nav" data-view="${s.view}">Open</button>` : ''}
+    </li>`).join('')}</ol>
+    <button class="btn primary big" data-action="review-finish">${rs.due ? 'Finish weekly review' : 'Log another review'}</button>`;
+};
+
+function reviewChecks(periodStart) {
+  const saved = prefs.get('reviewChecks', { period: null, done: {} });
+  return saved.period === periodStart ? saved.done : {};
+}
+
+views.done = () => {
+  const items = live(doc().items).filter((i) => i.done && i.completedAt > Date.now() - 30 * 86400000)
+    .sort((a, b) => b.completedAt - a.completedAt);
+  const byDay = new Map();
+  for (const i of items) {
+    const k = isoDay(new Date(i.completedAt));
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(i);
+  }
+  return `${header('Done', `${plural(items.length, 'action')} finished in the last 30 days.`)}
+    ${[...byDay].map(([k, arr]) => `<h2 class="group">${esc(fmtDay(k))} <span class="count">${arr.length}</span></h2>${taskList(arr)}`).join('') || empty('Nothing completed recently.')}`;
+};
+
+views.more = () => {
+  const d = doc();
+  const counts = {
+    waiting: openItems(d).filter((i) => i.list === 'waiting').length,
+    someday: openItems(d).filter((i) => i.list === 'someday').length,
+    upcoming: openItems(d).filter((i) => i.due || (i.start && i.start > today())).length,
+    review: reviewStatus(d, today()).due ? 'due' : '',
+  };
+  return `${header('More')}
+    <ul class="menu">${['waiting', 'someday', 'upcoming', 'review', 'done', 'settings'].map((id) => {
+    const v = VIEWS.find((x) => x.id === id);
+    return `<li><button data-action="nav" data-view="${id}">${icon(id)}<span>${v.label}</span>${counts[id] ? `<span class="badge ${id === 'review' ? 'warn' : ''}">${counts[id]}</span>` : ''}</button></li>`;
+  }).join('')}</ul>`;
+};
+
+views.settings = () => {
+  const s = doc().settings;
+  const st = sync.status;
+  const last = sync.lastSync ? new Date(sync.lastSync).toLocaleString() : 'never';
+  return `${header('Settings')}
+    <section class="card"><h2>Contexts</h2>
+      <form data-form="contexts"><label>Comma-separated, without the @<input name="contexts" value="${esc(s.contexts.join(', '))}"></label><button class="btn">Save contexts</button></form>
+    </section>
+    <section class="card"><h2>Weekly review</h2>
+      <label>Review day <select data-action="review-day">${WEEKDAY_NAMES.map((n, i) => `<option value="${i}" ${i === (s.reviewDay ?? 1) ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <p class="hint">From this day until you finish a review, a reminder shows at the top of the Now screen.</p>
+    </section>
+    <section class="card" id="sync-settings"><h2>Sync (Dropbox)</h2>
+      <p class="hint">Your data stays on each device and is mirrored to one file in a private Dropbox app folder that only this app can see. See the README for the 5-minute setup.</p>
+      ${sync.connected ? `<p>Connected. Last sync: <strong>${esc(last)}</strong>${st.state === 'error' ? ` · <span class="bad-text">${esc(st.message)}</span>` : ''}</p>
+        <div class="row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn danger" data-action="sync-disconnect">Disconnect</button></div>`
+    : `<form data-form="dropbox"><label>Dropbox app key<input name="appKey" value="${esc(sync.appKey)}" autocomplete="off" spellcheck="false"></label>
+        <p class="hint">Redirect URI to register in the Dropbox console: <code>${esc(sync.redirectUri())}</code></p>
+        <button class="btn primary">Connect Dropbox</button></form>
+        ${st.state === 'error' ? `<p class="bad-text">${esc(st.message)}</p>` : ''}`}
+    </section>
+    <section class="card"><h2>Backup</h2>
+      <div class="row"><button class="btn" data-action="export">Export JSON</button>
+      <label class="btn">Import / merge JSON<input type="file" accept="application/json,.json" data-action="import" hidden></label></div>
+    </section>
+    <section class="card"><h2>Capture shorthand</h2>
+      <p>Type in the capture bar: <code>Call Sam re invoice @phone +Tax_return ~10m !low due:fri start:+2d</code></p>
+      <ul class="plain"><li><code>@context</code>, <code>+Project_Name</code> (underscores become spaces)</li>
+      <li><code>~15m</code> / <code>~1h</code> time needed, <code>!low</code> <code>!med</code> <code>!high</code> energy</li>
+      <li><code>due:</code> / <code>start:</code> with <code>today</code>, <code>tmr</code>, <code>mon</code>…<code>sun</code>, <code>+3d</code>, <code>+2w</code>, <code>25/12</code>, <code>2026-12-25</code></li></ul>
+    </section>
+    <section class="card"><h2>Keyboard (Windows)</h2>
+      <ul class="plain"><li><kbd>N</kbd> or <kbd>/</kbd> capture · <kbd>P</kbd> process inbox · <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> switch views · <kbd>Esc</kbd> close</li></ul>
+    </section>`;
+};
+
+// ---------- clarify / process wizard ----------
+function processStart() {
+  const first = inboxItems(doc())[0];
+  if (!first) { toast('Inbox is empty'); return; }
+  state.view = 'inbox';
+  state.process = { id: first.id, step: 'actionable', history: [], skipped: [], draft: draftFrom(first) };
+  render();
+}
+
+function draftFrom(i) {
+  return {
+    title: i.title, notes: i.notes || '', contexts: [...(i.contexts || [])], timeMin: i.timeMin, energy: i.energy,
+    due: i.due, start: i.start, projectId: i.projectId, waitingOn: i.waitingOn || '', outcome: '',
+  };
+}
+
+function processNextItem() {
+  const p = state.process;
+  const nextItem = inboxItems(doc()).find((i) => !p.skipped.includes(i.id));
+  if (!nextItem) { state.process = { step: 'zero', skipped: p.skipped, history: [] }; render(); return; }
+  state.process = { id: nextItem.id, step: 'actionable', history: [], skipped: p.skipped, draft: draftFrom(nextItem) };
+  render();
+}
+
+function step(to, { read = true } = {}) {
+  const p = state.process;
+  if (read) readDraft();
+  p.history.push(p.step);
+  p.step = to;
+  render();
+}
+
+function readDraft() {
+  const p = state.process;
+  if (!p?.draft) return;
+  const TEXT = ['title', 'notes', 'outcome', 'waitingOn'];
+  for (const el of $$('[data-draft]')) {
+    const k = el.dataset.draft;
+    p.draft[k] = TEXT.includes(k) ? el.value.trim() : el.value || null;
+  }
+}
+
+function finishItem(patch) {
+  const p = state.process;
+  readDraft();
+  const dr = p.draft;
+  const base = {
+    title: dr.title, notes: dr.notes, contexts: dr.contexts, timeMin: dr.timeMin, energy: dr.energy,
+    due: dr.due || null, start: dr.start || null, projectId: dr.projectId || null,
+  };
+  store.updateItem(p.id, { ...base, ...patch });
+  processNextItem();
+}
+
+function processView() {
+  const p = state.process;
+  const remaining = inboxItems(doc()).length;
+  if (p.step === 'zero') {
+    return `${header('Inbox processed')}
+      <div class="wizard done-card"><p class="big-emoji">✓</p><p><strong>${p.skipped.length ? `Done, apart from ${plural(p.skipped.length, 'skipped item')}.` : 'Inbox zero.'}</strong> Everything is where it belongs.</p>
+      <div class="row"><button class="btn primary" data-action="nav" data-view="now">What should I do now?</button>
+      ${p.skipped.length ? '<button class="btn" data-action="process-start">Go through skipped</button>' : ''}</div></div>`;
+  }
+  const item = doc().items[p.id];
+  if (!item || item.deleted || item.list !== 'inbox' || item.done) { queueMicrotask(processNextItem); return ''; }
+  const dr = p.draft;
+  const vague = vagueHint(dr.title);
+  const projects = live(doc().projects).filter((x) => x.status === 'active').sort((a, b) => a.title.localeCompare(b.title));
+  const q = (title, help = '') => `<h2 class="q">${title}</h2>${help ? `<p class="hint">${help}</p>` : ''}`;
+  let body = '';
+  switch (p.step) {
+    case 'actionable':
+      body = `${q('Is it actionable?', 'Is there something you (or someone) need to do about this?')}
+        <div class="choices"><button class="btn primary" data-action="p-go" data-to="multi">Yes</button><button class="btn" data-action="p-go" data-to="not">No</button></div>`;
+      break;
+    case 'not':
+      body = `${q('Not actionable: where does it go?')}
+        <div class="choices"><button class="btn" data-action="p-finish" data-list="someday">Someday / Maybe<small>Might do later</small></button>
+        <button class="btn" data-action="p-finish" data-list="reference">Reference<small>Keep for info</small></button>
+        <button class="btn danger" data-action="p-trash">Trash<small>Not needed</small></button></div>`;
+      break;
+    case 'multi':
+      body = `${q('Will it take more than one action to finish?', 'If yes, it\'s a project: you\'ll define the outcome, then the first step.')}
+        <div class="choices"><button class="btn" data-action="p-go" data-to="project">Yes, it's a project</button><button class="btn primary" data-action="p-go" data-to="action">No, single action</button></div>`;
+      break;
+    case 'project':
+      body = `${q('Define the project')}
+        <label>Outcome: what does "done" look like?<input data-draft="outcome" value="${esc(dr.outcome || dr.title)}" placeholder="e.g. Car serviced and MOT passed"></label>
+        <label>Very next physical action<input data-draft="title" data-vague value="${dr.projectId ? esc(dr.title) : ''}" placeholder="e.g. Call garage to book service" autofocus></label>
+        <p class="vague-hint" aria-live="polite"></p>
+        <div class="choices"><button class="btn primary" data-action="p-project">Continue</button></div>`;
+      break;
+    case 'action':
+      body = `${q('What\'s the very next physical action?', 'Make it something you could start without thinking: a verb, an object, a place.')}
+        <label>Action<input data-draft="title" data-vague value="${esc(dr.title)}" autofocus></label>
+        <p class="vague-hint" aria-live="polite">${vague ? esc(vague) : ''}</p>
+        ${projects.length ? `<label>Part of a project? <select data-draft="projectId"><option value="">No project</option>${projects.map((x) => `<option value="${x.id}" ${dr.projectId === x.id ? 'selected' : ''}>${esc(x.title)}</option>`).join('')}</select></label>` : ''}
+        <div class="choices"><button class="btn primary" data-action="p-go" data-to="two">Continue</button></div>`;
+      break;
+    case 'two':
+      body = `${q('Will it take less than 2 minutes?', `<strong>${esc(dr.title)}</strong>`)}
+        <div class="choices"><button class="btn primary" data-action="p-go" data-to="doit">Yes, do it now</button><button class="btn" data-action="p-go" data-to="who">No</button></div>`;
+      break;
+    case 'doit':
+      body = `${q('Do it now', `<strong>${esc(dr.title)}</strong>. Faster than tracking it.`)}
+        <div class="choices"><button class="btn primary" data-action="p-did">Done ✓</button><button class="btn" data-action="p-go" data-to="who">It's taking longer, keep it</button></div>`;
+      break;
+    case 'who':
+      body = `${q('Are you the right person to do it?')}
+        <div class="choices"><button class="btn primary" data-action="p-go" data-to="details">Yes, me</button><button class="btn" data-action="p-go" data-to="delegate">Delegate it</button></div>`;
+      break;
+    case 'delegate':
+      body = `${q('Who are you handing it to?', 'Send the request now, then track it in Waiting for.')}
+        <label>Waiting on<input data-draft="waitingOn" value="${esc(dr.waitingOn)}" placeholder="Name" autofocus></label>
+        <label>Check back by (optional)<input type="date" data-draft="due" value="${esc(dr.due || '')}"></label>
+        <div class="choices"><button class="btn primary" data-action="p-finish" data-list="waiting">Save to Waiting for</button></div>`;
+      break;
+    case 'details':
+      body = `${q('When and where can you do it?', 'Only add dates if they are real. Context, time and energy are what the Now view filters on.')}
+        <div class="filter-row"><span class="filter-label">Context</span>${doc().settings.contexts.map((c) => `<button class="pill ${dr.contexts.includes(c) ? 'on' : ''}" data-action="p-ctx" data-ctx="${esc(c)}">@${esc(c)}</button>`).join('')}</div>
+        <div class="filter-row"><span class="filter-label">Time</span>${TIME_CHOICES.map((m) => `<button class="pill ${dr.timeMin === m ? 'on' : ''}" data-action="p-time" data-min="${m}">${fmtMin(m)}</button>`).join('')}</div>
+        <div class="filter-row"><span class="filter-label">Energy</span>${['low', 'med', 'high'].map((e) => `<button class="pill ${dr.energy === e ? 'on' : ''}" data-action="p-energy" data-energy="${e}">${e}</button>`).join('')}</div>
+        <div class="row dates"><label>Not before<input type="date" data-draft="start" value="${esc(dr.start || '')}"></label>
+        <label>Deadline<input type="date" data-draft="due" value="${esc(dr.due || '')}"></label></div>
+        <div class="choices"><button class="btn primary" data-action="p-finish" data-list="next">Save as next action</button></div>`;
+      break;
+    default:
+      body = '';
+  }
+  return `${header('Clarify', `${plural(remaining, 'item')} left in inbox`)}
+    <div class="wizard">
+      <div class="wizard-item"><span class="label">Item</span><strong>${esc(item.title)}</strong>${item.notes ? `<p class="task-notes">${esc(item.notes)}</p>` : ''}</div>
+      ${body}
+      <div class="wizard-nav">${p.history.length ? '<button class="link" data-action="p-back">← Back</button>' : '<span></span>'}
+        <span><button class="link" data-action="p-skip">Skip for now</button> · <button class="link" data-action="p-stop">Stop</button></span></div>
+    </div>`;
+}
+
+// ---------- editor dialog ----------
+function openEditor(id) {
+  const i = doc().items[id];
+  if (!i || i.deleted) return;
+  state.editingId = id;
+  const d = doc();
+  const projects = live(d.projects).filter((p) => p.status !== 'done' || p.id === i.projectId).sort((a, b) => a.title.localeCompare(b.title));
+  const ctxs = [...new Set([...d.settings.contexts, ...(i.contexts || [])])];
+  const dlg = $('#editor');
+  $('#editor-form').innerHTML = `
+    <label>Action<input name="title" value="${esc(i.title)}" data-vague required></label>
+    <p class="vague-hint" aria-live="polite">${esc(i.list === 'next' ? vagueHint(i.title) || '' : '')}</p>
+    <label>Notes<textarea name="notes" rows="3">${esc(i.notes)}</textarea></label>
+    <div class="grid2">
+      <label>List<select name="list">${[['inbox', 'Inbox'], ['next', 'Next action'], ['waiting', 'Waiting for'], ['someday', 'Someday / Maybe'], ['reference', 'Reference']]
+    .map(([v, l]) => `<option value="${v}" ${i.list === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Project<select name="projectId"><option value="">None</option>${projects.map((p) => `<option value="${p.id}" ${i.projectId === p.id ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}</select></label>
+      <label>Time<select name="timeMin"><option value="">?</option>${TIME_CHOICES.map((m) => `<option value="${m}" ${i.timeMin === m ? 'selected' : ''}>${fmtMin(m)}</option>`).join('')}</select></label>
+      <label>Energy<select name="energy"><option value="">?</option>${['low', 'med', 'high'].map((e) => `<option ${i.energy === e ? 'selected' : ''}>${e}</option>`).join('')}</select></label>
+      <label>Not before<input type="date" name="start" value="${esc(i.start || '')}"></label>
+      <label>Deadline<input type="date" name="due" value="${esc(i.due || '')}"></label>
+    </div>
+    <fieldset><legend>Contexts</legend><div class="filter-row">${ctxs.map((c) => `<label class="pill-check"><input type="checkbox" name="ctx" value="${esc(c)}" ${i.contexts?.includes(c) ? 'checked' : ''}><span>@${esc(c)}</span></label>`).join('')}</div></fieldset>
+    <label class="waiting-field">Waiting on<input name="waitingOn" value="${esc(i.waitingOn || '')}"></label>
+    <div class="row end"><button type="button" class="btn danger" data-action="editor-delete">Delete</button><span class="spacer"></span>
+      <button type="button" class="btn" data-action="editor-cancel">Cancel</button><button class="btn primary">Save</button></div>`;
+  dlg.showModal();
+  toggleWaitingField();
+}
+
+function saveEditor(form) {
+  const f = new FormData(form);
+  const timeMin = f.get('timeMin') ? Number(f.get('timeMin')) : null;
+  store.updateItem(state.editingId, {
+    title: f.get('title').trim(), notes: f.get('notes'), list: f.get('list'), projectId: f.get('projectId') || null,
+    timeMin, energy: f.get('energy') || null, start: f.get('start') || null, due: f.get('due') || null,
+    contexts: f.getAll('ctx'), waitingOn: f.get('waitingOn').trim(),
+  });
+  $('#editor').close();
+}
+
+// ---------- capture ----------
+function capturePreview() {
+  const v = $('#capture-input').value;
+  const p = parseCapture(v, today());
+  const bits = [];
+  for (const c of p.contexts) bits.push(`@${esc(c)}`);
+  if (p.project) bits.push(`Project: ${esc(p.project)}`);
+  if (p.timeMin) bits.push(fmtMin(p.timeMin));
+  if (p.energy) bits.push(`${p.energy} energy`);
+  if (p.start) bits.push(`starts ${esc(fmtDay(p.start))}`);
+  if (p.due) bits.push(`due ${esc(fmtDay(p.due))}`);
+  $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('');
+}
+
+function capture(text, notes = '') {
+  const p = parseCapture(text, today());
+  if (!p.title) return null;
+  const projectId = p.project ? store.findOrCreateProject(p.project).id : null;
+  return store.addItem({
+    title: p.title, notes, contexts: p.contexts, projectId, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start,
+  });
+}
+
+// ---------- toast ----------
+let toastTimer;
+function toast(msg, undo) {
+  const el = $('#toast');
+  el.innerHTML = `<span>${esc(msg)}</span>${undo ? '<button class="link" data-action="undo">Undo</button>' : ''}`;
+  el.hidden = false;
+  toast.undo = undo;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; toast.undo = null; }, undo ? 6000 : 3000);
+}
+
+// ---------- render ----------
+let deferredRender = false;
+function isEditingMain() {
+  const a = document.activeElement;
+  return a && $('#main').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && a.value;
+}
+
+function render() {
+  const d = doc();
+  const t = today();
+  const counts = {
+    inbox: inboxItems(d).length,
+    next: nextActions(d, t).length,
+    projects: live(d.projects).filter((p) => projectHealth(d, p, t).stalled).length,
+    waiting: openItems(d).filter((i) => i.list === 'waiting').length,
+    review: reviewStatus(d, t).due ? '!' : '',
+  };
+  const navView = state.view === 'project' ? 'projects' : state.view;
+  $('#sidenav').innerHTML = VIEWS.map((v) => `<button class="${navView === v.id ? 'active' : ''}" data-action="nav" data-view="${v.id}" title="${v.label} (${v.key})">
+      ${icon(v.id)}<span>${v.label}</span>${counts[v.id] ? `<span class="badge ${v.id === 'projects' || v.id === 'review' ? 'warn' : ''}">${counts[v.id]}</span>` : ''}</button>`).join('');
+  const moreActive = !MOBILE_TABS.includes(navView);
+  $('#tabbar').innerHTML = MOBILE_TABS.map((id) => {
+    const label = id === 'more' ? 'More' : VIEWS.find((v) => v.id === id).label.split(' ')[0];
+    const badge = id === 'more' ? counts.review : counts[id];
+    return `<button class="${navView === id || (id === 'more' && moreActive) ? 'active' : ''}" data-action="nav" data-view="${id}">${icon(id)}<span>${label}</span>${badge ? `<span class="badge ${id === 'more' || id === 'projects' ? 'warn' : ''}">${badge}</span>` : ''}</button>`;
+  }).join('');
+  const html = (views[state.view] || views.now)();
+  $('#main').innerHTML = html;
+  const af = $('#main [autofocus]');
+  if (af && matchMedia('(pointer: fine)').matches) af.focus();
+  document.title = counts.inbox ? `(${counts.inbox}) Clearhead` : 'Clearhead';
+  renderSync();
+}
+
+function renderSync() {
+  const el = $('#sync-dot');
+  if (!sync.connected) { el.hidden = true; return; }
+  el.hidden = false;
+  const st = sync.status;
+  el.dataset.state = st.state;
+  el.title = { syncing: 'Syncing…', ok: 'Synced', error: `Sync error: ${st.message}`, offline: st.message, idle: 'Sync ready' }[st.state] || '';
+}
+
+// ---------- events ----------
+const actions = {
+  nav: (el) => go(el.dataset.view),
+  'open-project': (el) => go('project', { projectId: el.dataset.pid }),
+  'toggle-done': (el, id) => {
+    const i = doc().items[id];
+    store.updateItem(id, { done: !i.done });
+    if (!i.done) toast('Done', () => store.updateItem(id, { done: false }));
+  },
+  'toggle-focus': (el, id) => store.updateItem(id, { focus: !doc().items[id].focus }),
+  edit: (el, id) => openEditor(id),
+  'now-ctx': (el) => {
+    const c = el.dataset.ctx;
+    const set = new Set(state.now.contexts);
+    if (set.has(c)) set.delete(c); else set.add(c);
+    state.now.contexts = [...set];
+    saveNow();
+  },
+  'now-time': (el) => { const m = Number(el.dataset.min); state.now.timeMin = state.now.timeMin === m ? null : m; saveNow(); },
+  'now-energy': (el) => { const e = el.dataset.energy; state.now.energy = state.now.energy === e ? null : e; saveNow(); },
+  'now-clear': () => { state.now = { contexts: [], timeMin: null, energy: null }; saveNow(); },
+  'now-all': () => { state.showAllNow = !state.showAllNow; render(); },
+  'next-filter': (el) => { state.nextFilter = el.dataset.ctx || null; prefs.set('nextFilter', state.nextFilter); render(); },
+  'process-start': processStart,
+  'p-go': (el) => step(el.dataset.to),
+  'p-back': () => { const p = state.process; readDraft(); p.step = p.history.pop(); render(); },
+  'p-skip': () => { state.process.skipped.push(state.process.id); processNextItem(); },
+  'p-stop': () => { state.process = null; render(); },
+  'p-trash': () => { const id = state.process.id; const before = doc().items[id]; store.deleteItem(id); toast('Deleted', () => store.restoreItem(before)); processNextItem(); },
+  'p-finish': (el) => {
+    const list = el.dataset.list;
+    readDraft();
+    if (list === 'waiting' && !state.process.draft.waitingOn) { toast('Who are you waiting on?'); return; }
+    finishItem({ list, waitingOn: list === 'waiting' ? state.process.draft.waitingOn : '' });
+  },
+  'p-did': () => { finishItem({ list: 'next', done: true }); toast('Nice, done in under 2 minutes'); },
+  'p-project': () => {
+    readDraft();
+    const dr = state.process.draft;
+    if (!dr.title) { toast('Add the very next action'); return; }
+    const fields = { title: dr.outcome || doc().items[state.process.id].title, outcome: dr.outcome };
+    const existing = dr.projectId && doc().projects[dr.projectId];
+    // The store change re-renders this step, so don't read the (reset) inputs again.
+    dr.projectId = existing && !existing.deleted ? store.updateProject(dr.projectId, fields).id : store.addProject(fields).id;
+    step('two', { read: false });
+  },
+  'p-ctx': (el) => {
+    readDraft();
+    const dr = state.process.draft;
+    const c = el.dataset.ctx;
+    dr.contexts = dr.contexts.includes(c) ? dr.contexts.filter((x) => x !== c) : [...dr.contexts, c];
+    render();
+  },
+  'p-time': (el) => { readDraft(); const m = Number(el.dataset.min); state.process.draft.timeMin = state.process.draft.timeMin === m ? null : m; render(); },
+  'p-energy': (el) => { readDraft(); const e = el.dataset.energy; state.process.draft.energy = state.process.draft.energy === e ? null : e; render(); },
+  'review-finish': () => {
+    store.completeReview(today());
+    prefs.set('reviewChecks', null);
+    toast('Weekly review logged. Your system is current.');
+    go('now');
+  },
+  'project-status': (el) => {
+    store.updateProject(state.projectId, { status: el.dataset.status });
+    toast(`Project ${{ done: 'completed', someday: 'moved to Someday', active: 'active' }[el.dataset.status]}`);
+  },
+  'project-delete': () => {
+    if (!confirm('Delete this project? Its actions are kept as standalone actions.')) return;
+    store.deleteProject(state.projectId);
+    go('projects');
+  },
+  activate: (el) => { store.updateItem(el.dataset.id, { list: 'next' }); toast('Moved to Next actions'); },
+  'follow-up': (el, id) => {
+    const i = doc().items[id];
+    store.addItem({ title: `Follow up with ${i.waitingOn || 'them'}: ${i.title}`, list: 'next', contexts: ['phone'], timeMin: 5, projectId: i.projectId });
+    store.updateItem(i.id, { waitingSince: Date.now() });
+    toast('Follow-up added to Next actions');
+  },
+  'sync-now': () => sync.run(),
+  'sync-disconnect': () => { if (confirm('Stop syncing this device? Data on this device is kept.')) { sync.disconnect(); render(); } },
+  export: () => {
+    const blob = new Blob([JSON.stringify(doc(), null, 2)], { type: 'application/json' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `clearhead-backup-${today()}.json` });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  },
+  'editor-cancel': () => $('#editor').close(),
+  'editor-delete': () => {
+    const id = state.editingId;
+    const before = doc().items[id];
+    store.deleteItem(id);
+    $('#editor').close();
+    toast('Deleted', () => store.restoreItem(before));
+  },
+  undo: () => { const fn = toast.undo; $('#toast').hidden = true; if (fn) fn(); },
+};
+
+function saveNow() {
+  state.showAllNow = false;
+  prefs.set('nowCtx', state.now);
+  render();
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el || el.tagName === 'INPUT' || el.tagName === 'SELECT') return;
+  const fn = actions[el.dataset.action];
+  if (!fn) return;
+  e.preventDefault();
+  const id = el.closest('[data-id]')?.dataset.id;
+  fn(el, id);
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if (el.dataset.action === 'review-check') {
+    const rs = reviewStatus(doc(), today());
+    const checks = { ...reviewChecks(rs.periodStart), [el.dataset.step]: el.checked };
+    prefs.set('reviewChecks', { period: rs.periodStart, done: checks });
+    render();
+  } else if (el.dataset.action === 'review-day') {
+    store.updateSettings({ reviewDay: Number(el.value) });
+  } else if (el.dataset.action === 'import') {
+    const file = el.files[0];
+    if (!file) return;
+    file.text().then((txt) => {
+      store.mergeIn(normalizeDoc(JSON.parse(txt)));
+      sync.schedule(0);
+      toast('Imported and merged');
+    }).catch(() => toast('That file could not be read'));
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.id === 'capture-input') capturePreview();
+  if (el.hasAttribute('data-vague')) {
+    const hint = el.closest('form, .wizard')?.querySelector('.vague-hint');
+    if (hint) hint.textContent = vagueHint(el.value) || '';
+  }
+  if (el.closest('#editor-form') && el.name === 'list') toggleWaitingField();
+});
+
+function toggleWaitingField() {
+  const f = $('#editor-form');
+  const w = f.querySelector('.waiting-field');
+  if (w) w.hidden = f.elements.list.value !== 'waiting' && !f.elements.waitingOn.value;
+}
+document.addEventListener('change', (e) => { if (e.target.closest('#editor-form') && e.target.name === 'list') toggleWaitingField(); });
+
+document.addEventListener('submit', (e) => {
+  const form = e.target;
+  e.preventDefault();
+  if (form.id === 'capture') {
+    const input = $('#capture-input');
+    const item = capture(input.value);
+    if (!item) return;
+    input.value = '';
+    capturePreview();
+    toast('Captured to Inbox', () => store.deleteItem(item.id));
+    return;
+  }
+  if (form.id === 'editor-form') { saveEditor(form); return; }
+  const kind = form.dataset.form;
+  const val = (n) => form.elements[n]?.value.trim() ?? '';
+  if (kind === 'new-project') {
+    if (!val('title')) return;
+    const p = store.addProject({ title: val('title') });
+    go('project', { projectId: p.id });
+    toast('Project created. Now add its very next action.');
+  } else if (kind === 'project-action') {
+    const text = val('title');
+    if (!text) return;
+    const parsed = parseCapture(text, today());
+    store.addItem({ title: parsed.title, list: 'next', projectId: form.dataset.pid, contexts: parsed.contexts, timeMin: parsed.timeMin, energy: parsed.energy, due: parsed.due, start: parsed.start });
+    const hint = vagueHint(parsed.title);
+    if (hint) toast(hint);
+  } else if (kind === 'project-edit') {
+    store.updateProject(form.dataset.pid, { title: val('title') || 'Untitled project', outcome: val('outcome'), notes: form.elements.notes.value });
+    toast('Project saved');
+  } else if (kind === 'contexts') {
+    const list = [...new Set(val('contexts').split(',').map((c) => c.trim().replace(/^@/, '').toLowerCase().replace(/\s+/g, '-')).filter(Boolean))];
+    store.updateSettings({ contexts: list });
+    state.now.contexts = state.now.contexts.filter((c) => list.includes(c));
+    prefs.set('nowCtx', state.now);
+    toast('Contexts saved');
+  } else if (kind === 'dropbox') {
+    sync.appKey = val('appKey');
+    sync.connect().catch((err) => toast(err.message));
+  }
+});
+
+document.addEventListener('focusout', () => {
+  if (deferredRender) setTimeout(() => { if (deferredRender && !isEditingMain()) { deferredRender = false; render(); } }, 0);
+});
+
+document.addEventListener('keydown', (e) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (e.key === 'Escape' && e.target.id === 'capture-input') { e.target.blur(); return; }
+  if (typing || e.ctrlKey || e.metaKey || e.altKey || $('#editor').open) return;
+  if (e.key === 'n' || e.key === '/') { e.preventDefault(); $('#capture-input').focus(); return; }
+  if (e.key === 'p') { processStart(); return; }
+  const v = VIEWS.find((x) => x.key === e.key);
+  if (v) go(v.id);
+});
+
+$('#editor').addEventListener('close', () => { state.editingId = null; });
+
+// ---------- startup ----------
+store.subscribe(({ local }) => {
+  if (!local && isEditingMain()) deferredRender = true;
+  else render();
+  if (local) sync.schedule();
+});
+sync.onStatus(() => {
+  renderSync();
+  if (state.view === 'settings' && !isEditingMain()) render();
+});
+
+async function start() {
+  if (!matchMedia('(pointer: fine)').matches) $('#capture-input').placeholder = 'Capture anything…';
+  render();
+  await sync.handleRedirect().catch((e) => toast(e.message));
+  const params = new URLSearchParams(location.search);
+  if (params.has('share')) {
+    const text = [params.get('title'), params.get('text')].filter(Boolean).join(' ').trim();
+    const url = params.get('url') || '';
+    if (text || url) {
+      capture(text || url, text && url ? url : '');
+      toast('Shared item captured to Inbox');
+    }
+    history.replaceState(null, '', location.pathname);
+  }
+  if (params.has('capture')) {
+    history.replaceState(null, '', location.pathname);
+    setTimeout(() => $('#capture-input').focus(), 50);
+  }
+  if (params.has('process')) {
+    history.replaceState(null, '', location.pathname);
+    processStart();
+  }
+  render();
+  sync.run();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); sync.run(); } });
+  addEventListener('online', () => sync.run());
+  setInterval(() => { if (document.visibilityState === 'visible') sync.run(); }, 5 * 60 * 1000);
+  navigator.storage?.persist?.().catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+  }
+}
+
+start();
