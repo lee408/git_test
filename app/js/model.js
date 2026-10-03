@@ -85,10 +85,36 @@ function parseDuration(s) {
   return Number(m[1] || 0) * 60 + Number(m[2] || 0);
 }
 
+// "14:00", "9am", "2:30pm", "0930" → "HH:MM" (24h) or null.
+export function parseTime(s) {
+  const m = String(s).toLowerCase().match(/^(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?$/);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2] || 0);
+  if (!m[2] && !m[3] && m[1].length > 2) return null;
+  if (m[3]) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (m[3] === 'pm' ? 12 : 0);
+  }
+  if (h > 23 || min > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+// Time block: "14:00" (today), "fri-14:00", "tmr-9am", "2026-10-05-14:30" → { date, time } or null.
+export function parseAt(s, today) {
+  const t = parseTime(s);
+  if (t) return { date: today, time: t };
+  const m = String(s).match(/^(.+)[-@](.+)$/);
+  if (!m) return null;
+  const date = parseDateWord(m[1], today);
+  const time = parseTime(m[2]);
+  return date && time ? { date, time } : null;
+}
+
 // ---------- quick-capture shorthand ----------
-// "Call Sam about invoice @phone +Tax_return ~10m !low due:fri start:+2d"
+// "Call Sam about invoice @phone +Tax_return ~10m !low due:fri start:+2d at:thu-14:00"
 export function parseCapture(text, today) {
-  const out = { title: '', contexts: [], project: null, timeMin: null, energy: null, due: null, start: null };
+  const out = { title: '', contexts: [], project: null, timeMin: null, energy: null, due: null, start: null, schedDate: null, schedTime: null };
   const rest = [];
   for (const tok of text.trim().split(/\s+/)) {
     if (!tok) continue;
@@ -105,6 +131,8 @@ export function parseCapture(text, today) {
       out.energy = e.startsWith('l') ? 'low' : e.startsWith('h') ? 'high' : 'med';
     } else if ((m = tok.match(/^(due|start):(.+)$/i)) && parseDateWord(m[2], today)) {
       out[m[1].toLowerCase()] = parseDateWord(m[2], today);
+    } else if ((m = tok.match(/^at:(.+)$/i)) && parseAt(m[1], today)) {
+      ({ date: out.schedDate, time: out.schedTime } = parseAt(m[1], today));
     } else {
       rest.push(tok);
     }

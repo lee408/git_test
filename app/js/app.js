@@ -5,6 +5,7 @@ import {
 import { store, prefs } from './store.js';
 import { sync } from './sync.js';
 import { buildSweep, splitLines } from './sweep.js';
+import { gcalUrl, calKey, calendarKinds, calendarState, blockLength, blockEnd } from './calendar.js';
 
 // ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -88,7 +89,16 @@ function chips(i, { project = true } = {}) {
     const cls = d < 0 ? 'bad' : d === 0 ? 'warn' : '';
     out.push(`<span class="chip ${cls}">Due ${esc(fmtDay(i.due))}</span>`);
   }
+  if (i.schedDate && i.schedTime) {
+    const cls = i.schedDate < t && !i.done ? 'bad' : i.schedDate === t ? 'warn' : '';
+    out.push(`<span class="chip block ${cls}">${esc(fmtDay(i.schedDate))} ${esc(i.schedTime)}–${esc(blockEnd(i.schedDate, i.schedTime, blockLength(i)).time)}</span>`);
+  }
   if (i.start && i.start > t) out.push(`<span class="chip">Starts ${esc(fmtDay(i.start))}</span>`);
+  if (i.cal && !i.done) {
+    const states = Object.keys(i.cal).filter((k) => i.cal[k]).map((k) => calendarState(i, k));
+    if (states.includes('outdated')) out.push('<span class="chip warn">Calendar out of date</span>');
+    else if (states.includes('added')) out.push('<span class="chip">In calendar</span>');
+  }
   for (const c of i.contexts || []) out.push(`<span class="chip ctx">@${esc(c)}</span>`);
   if (project && i.projectId && doc().projects[i.projectId] && !doc().projects[i.projectId].deleted) {
     out.push(`<button class="chip proj" data-action="open-project" data-pid="${i.projectId}">${esc(doc().projects[i.projectId].title)}</button>`);
@@ -145,7 +155,10 @@ views.now = () => {
   const d = doc();
   const t = today();
   const ctxs = d.settings.contexts;
-  const suggestions = suggestNow(d, t, state.now);
+  const blocks = openItems(d).filter((i) => i.schedDate === t && i.schedTime && !['someday', 'reference'].includes(i.list))
+    .sort((a, b) => a.schedTime.localeCompare(b.schedTime));
+  const blockIds = new Set(blocks.map((i) => i.id));
+  const suggestions = suggestNow(d, t, state.now).filter((i) => !blockIds.has(i.id));
   const shown = state.showAllNow ? suggestions : suggestions.slice(0, NOW_LIMIT);
   const hidden = suggestions.length - shown.length;
   const overdueWaiting = openItems(d).filter((i) => i.list === 'waiting' && Date.now() - (i.waitingSince || i.createdAt) > 7 * 86400000).length;
@@ -164,6 +177,7 @@ views.now = () => {
         ${state.now.contexts.length || state.now.timeMin || state.now.energy ? '<button class="link" data-action="now-clear">Clear</button>' : ''}
       </div>
     </section>
+    ${blocks.length ? `<h2 class="group">Scheduled today <span class="count">${blocks.length}</span></h2>${taskList(blocks)}<h2 class="group">Then, best fits</h2>` : ''}
     ${shown.length ? taskList(shown) : empty(nextActions(d, t).length
     ? 'Nothing fits right now. Try a different context, or more time or energy.'
     : 'No next actions yet. Capture something above, then process your inbox.')}
@@ -280,18 +294,50 @@ views.someday = () => {
 
 views.upcoming = () => {
   const t = today();
-  const items = openItems(doc()).filter((i) => i.due || (i.start && i.start > t));
+  const items = openItems(doc()).filter((i) => i.due || i.schedDate || (i.start && i.start > t));
   const byDay = new Map();
   for (const i of items) {
-    const key = i.start && i.start > t && (!i.due || i.start < i.due) ? i.start : i.due;
+    const key = [i.start > t ? i.start : null, i.schedDate, i.due].filter(Boolean).sort()[0];
     if (!byDay.has(key)) byDay.set(key, []);
     byDay.get(key).push(i);
   }
   const days = [...byDay.keys()].sort();
-  return `${header('Upcoming', 'Deadlines and things scheduled to come back (the "tickler"). Keep appointments in your calendar.')}
-    ${days.map((k) => `<h2 class="group ${k < t ? 'bad-text' : ''}">${esc(fmtDay(k))} <span class="count">${esc(k)}</span></h2>${taskList(byDay.get(k))}`).join('')
+  return `${header('Upcoming', 'Time blocks, deadlines and things scheduled to come back (the "tickler"). Send any of them to Google Calendar.')}
+    ${days.map((k) => `<h2 class="group ${k < t ? 'bad-text' : ''}">${esc(fmtDay(k))} <span class="count">${esc(k)}</span></h2><ul class="tasks">${byDay.get(k)
+    .sort((a, b) => (a.schedTime || '99').localeCompare(b.schedTime || '99'))
+    .map((i) => taskRow(i, { extra: calButtons(i) })).join('')}</ul>`).join('')
     || empty('Nothing dated. That\'s fine. GTD only uses dates for real deadlines.')}`;
 };
+
+// "Add to Google Calendar" buttons for whichever dates an item has that aren't in the calendar yet.
+function calButtons(i) {
+  const label = { due: 'deadline', block: 'time block' };
+  const btns = calendarKinds(i).filter((k) => calendarState(i, k) !== 'added')
+    .map((k) => `<button class="btn small cal" data-action="cal-add" data-kind="${k}">${calendarState(i, k) === 'outdated' ? 'Re-add' : 'Add'} ${label[k]} to Google Calendar</button>`);
+  return btns.length ? `<div class="row cal-row">${btns.join('')}</div>` : '';
+}
+
+function openCalendar(id, kind) {
+  const i = doc().items[id];
+  if (!i || !calKey(i, kind)) return;
+  const project = i.projectId && doc().projects[i.projectId];
+  const url = gcalUrl(i, kind, { tz: Intl.DateTimeFormat().resolvedOptions().timeZone, projectTitle: project && !project.deleted ? project.title : '' });
+  window.open(url, '_blank', 'noopener');
+  store.updateItem(id, { cal: { ...(i.cal || {}), [kind]: calKey(i, kind) } });
+}
+
+// After saving a dated action, offer to put it in Google Calendar (can be turned off in Settings).
+function offerCalendar(id) {
+  const i = doc().items[id];
+  if (!i || i.done || prefs.get('calOffer', true) === false) return false;
+  // An event that's now wrong matters more than one never added.
+  const kinds = calendarKinds(i);
+  const kind = kinds.find((k) => calendarState(i, k) === 'outdated') || kinds.find((k) => calendarState(i, k) === 'none');
+  if (!kind) return false;
+  const what = kind === 'due' ? 'deadline' : 'time block';
+  toast(`${calendarState(i, kind) === 'outdated' ? 'Date changed. Update' : 'Add'} the ${what} in Google Calendar?`, () => openCalendar(id, kind), 'Add');
+  return true;
+}
 
 const REVIEW_STEPS = [
   { id: 'loose', title: 'Mind sweep: collect loose ends', body: () => {
@@ -447,6 +493,12 @@ views.settings = () => {
         <button class="btn primary">Connect Dropbox</button></form>
         ${st.state === 'error' ? `<p class="bad-text">${esc(st.message)}</p>` : ''}`}
     </section>
+    <section class="card"><h2>Google Calendar</h2>
+      <p class="hint">Actions with a deadline or a time block get an "Add to Google Calendar" button (in the editor and in Upcoming). It opens Google Calendar with the event filled in. Nothing is sent until you press Save there, and no sign-in to Clearhead is needed.</p>
+      <p class="hint"><strong>Tip:</strong> keep these events separate. In Google Calendar, go to Settings → Add calendar → Create new calendar, name it "Clearhead", then pick it in the event form's calendar dropdown.</p>
+      <p class="hint">Changing a date later doesn't move the event. The action shows "Calendar out of date" with a Re-add button; delete the old event in Google Calendar.</p>
+      <label class="review-check"><input type="checkbox" data-action="cal-offer" ${prefs.get('calOffer', true) !== false ? 'checked' : ''}><span>Offer to add after saving a dated action</span></label>
+    </section>
     <section class="card"><h2>Backup</h2>
       <div class="row"><button class="btn" data-action="export">Export JSON</button>
       <label class="btn">Import / merge JSON<input type="file" accept="application/json,.json" data-action="import" hidden></label></div>
@@ -454,6 +506,7 @@ views.settings = () => {
     <section class="card"><h2>Capture shorthand</h2>
       <p>Type in the capture bar: <code>Call Sam re invoice @phone +Tax_return ~10m !low due:fri start:+2d</code></p>
       <ul class="plain"><li><code>@context</code>, <code>+Project_Name</code> (underscores become spaces)</li>
+      <li><code>at:</code> time block: <code>at:14:00</code> (today), <code>at:thu-9am</code>, <code>at:tmr-2:30pm</code>; length from <code>~</code> (default 1h)</li>
       <li><code>~15m</code> / <code>~1h</code> time needed, <code>!low</code> <code>!med</code> <code>!high</code> energy</li>
       <li><code>due:</code> / <code>start:</code> with <code>today</code>, <code>tmr</code>, <code>mon</code>…<code>sun</code>, <code>+3d</code>, <code>+2w</code>, <code>25/12</code>, <code>2026-12-25</code></li></ul>
     </section>
@@ -475,6 +528,7 @@ function draftFrom(i) {
   return {
     title: i.title, notes: i.notes || '', contexts: [...(i.contexts || [])], timeMin: i.timeMin, energy: i.energy,
     due: i.due, start: i.start, projectId: i.projectId, waitingOn: i.waitingOn || '', outcome: '',
+    schedDate: i.schedDate || null, schedTime: i.schedTime || null,
   };
 }
 
@@ -511,9 +565,12 @@ function finishItem(patch) {
   const base = {
     title: dr.title, notes: dr.notes, contexts: dr.contexts, timeMin: dr.timeMin, energy: dr.energy,
     due: dr.due || null, start: dr.start || null, projectId: dr.projectId || null,
+    ...blockFields(dr.schedDate, dr.schedTime),
   };
-  store.updateItem(p.id, { ...base, ...patch });
+  const id = p.id;
+  store.updateItem(id, { ...base, ...patch });
   processNextItem();
+  if (!patch.done) offerCalendar(id);
 }
 
 function processView() {
@@ -586,6 +643,9 @@ function processView() {
         <div class="filter-row"><span class="filter-label">Energy</span>${['low', 'med', 'high'].map((e) => `<button class="pill ${dr.energy === e ? 'on' : ''}" data-action="p-energy" data-energy="${e}">${e}</button>`).join('')}</div>
         <div class="row dates"><label>Not before<input type="date" data-draft="start" value="${esc(dr.start || '')}"></label>
         <label>Deadline<input type="date" data-draft="due" value="${esc(dr.due || '')}"></label></div>
+        <div class="row dates"><label>Block time on<input type="date" data-draft="schedDate" value="${esc(dr.schedDate || '')}"></label>
+        <label>at<input type="time" data-draft="schedTime" value="${esc(dr.schedTime || '')}"></label></div>
+        <p class="hint">A time block reserves a slot in your calendar; its length is the Time above (1h if not set).</p>
         <div class="choices"><button class="btn primary" data-action="p-finish" data-list="next">Save as next action</button></div>`;
       break;
     default:
@@ -617,11 +677,17 @@ function openEditor(id) {
       <label>List<select name="list">${[['inbox', 'Inbox'], ['next', 'Next action'], ['waiting', 'Waiting for'], ['someday', 'Someday / Maybe'], ['reference', 'Reference']]
     .map(([v, l]) => `<option value="${v}" ${i.list === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label>Project<select name="projectId"><option value="">None</option>${projects.map((p) => `<option value="${p.id}" ${i.projectId === p.id ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}</select></label>
-      <label>Time<select name="timeMin"><option value="">?</option>${TIME_CHOICES.map((m) => `<option value="${m}" ${i.timeMin === m ? 'selected' : ''}>${fmtMin(m)}</option>`).join('')}</select></label>
+      <label>Time<select name="timeMin"><option value="">?</option>${[...new Set([...TIME_CHOICES, ...(i.timeMin ? [i.timeMin] : [])])].sort((a, b) => a - b)
+    .map((m) => `<option value="${m}" ${i.timeMin === m ? 'selected' : ''}>${fmtMin(m)}</option>`).join('')}</select></label>
       <label>Energy<select name="energy"><option value="">?</option>${['low', 'med', 'high'].map((e) => `<option ${i.energy === e ? 'selected' : ''}>${e}</option>`).join('')}</select></label>
       <label>Not before<input type="date" name="start" value="${esc(i.start || '')}"></label>
       <label>Deadline<input type="date" name="due" value="${esc(i.due || '')}"></label>
+      <label>Block time on<input type="date" name="schedDate" value="${esc(i.schedDate || '')}"></label>
+      <label>at<input type="time" name="schedTime" value="${esc(i.schedTime || '')}"></label>
     </div>
+    <div class="row cal-row"><button type="button" class="btn small cal" data-action="editor-cal" data-kind="due">Deadline → Google Calendar</button>
+      <button type="button" class="btn small cal" data-action="editor-cal" data-kind="block">Time block → Google Calendar</button></div>
+    <p class="hint cal-status">${esc(calendarKinds(i).map((k) => `${k === 'due' ? 'Deadline' : 'Time block'}: ${{ none: 'not in calendar', added: 'added to calendar', outdated: 'calendar out of date' }[calendarState(i, k)]}`).join(' · '))}</p>
     <fieldset><legend>Contexts</legend><div class="filter-row">${ctxs.map((c) => `<label class="pill-check"><input type="checkbox" name="ctx" value="${esc(c)}" ${i.contexts?.includes(c) ? 'checked' : ''}><span>@${esc(c)}</span></label>`).join('')}</div></fieldset>
     <label class="waiting-field">Waiting on<input name="waitingOn" value="${esc(i.waitingOn || '')}"></label>
     <div class="row end"><button type="button" class="btn danger" data-action="editor-delete">Delete</button><span class="spacer"></span>
@@ -630,15 +696,25 @@ function openEditor(id) {
   toggleWaitingField();
 }
 
-function saveEditor(form) {
+// A time block needs both a date and a time; a lone time means today.
+function blockFields(date, time) {
+  if (!time) return { schedDate: null, schedTime: null };
+  return { schedDate: date || today(), schedTime: time };
+}
+
+function saveEditor(form, { offer = true } = {}) {
   const f = new FormData(form);
+  const id = state.editingId;
   const timeMin = f.get('timeMin') ? Number(f.get('timeMin')) : null;
-  store.updateItem(state.editingId, {
-    title: f.get('title').trim(), notes: f.get('notes'), list: f.get('list'), projectId: f.get('projectId') || null,
+  store.updateItem(id, {
+    title: f.get('title').trim() || doc().items[id].title, notes: f.get('notes'), list: f.get('list'), projectId: f.get('projectId') || null,
     timeMin, energy: f.get('energy') || null, start: f.get('start') || null, due: f.get('due') || null,
+    ...blockFields(f.get('schedDate'), f.get('schedTime')),
     contexts: f.getAll('ctx'), waitingOn: f.get('waitingOn').trim(),
   });
   $('#editor').close();
+  if (offer) offerCalendar(id);
+  return id;
 }
 
 // ---------- capture ----------
@@ -652,6 +728,7 @@ function capturePreview() {
   if (p.energy) bits.push(`${p.energy} energy`);
   if (p.start) bits.push(`starts ${esc(fmtDay(p.start))}`);
   if (p.due) bits.push(`due ${esc(fmtDay(p.due))}`);
+  if (p.schedTime) bits.push(`block ${esc(fmtDay(p.schedDate))} ${esc(p.schedTime)}`);
   $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('');
 }
 
@@ -661,18 +738,19 @@ function capture(text, notes = '', { projectId: defaultProject = null } = {}) {
   const projectId = p.project ? store.findOrCreateProject(p.project).id : defaultProject;
   return store.addItem({
     title: p.title, notes, contexts: p.contexts, projectId, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start,
+    schedDate: p.schedDate, schedTime: p.schedTime,
   });
 }
 
 // ---------- toast ----------
 let toastTimer;
-function toast(msg, undo) {
+function toast(msg, undo, label = 'Undo') {
   const el = $('#toast');
-  el.innerHTML = `<span>${esc(msg)}</span>${undo ? '<button class="link" data-action="undo">Undo</button>' : ''}`;
+  el.innerHTML = `<span>${esc(msg)}</span>${undo ? `<button class="link" data-action="undo">${esc(label)}</button>` : ''}`;
   el.hidden = false;
   toast.undo = undo;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; toast.undo = null; }, undo ? 6000 : 3000);
+  toastTimer = setTimeout(() => { el.hidden = true; toast.undo = null; }, undo ? 8000 : 3000);
 }
 
 // ---------- render ----------
@@ -813,6 +891,13 @@ const actions = {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
   'editor-cancel': () => $('#editor').close(),
+  'cal-add': (el, id) => openCalendar(id, el.dataset.kind),
+  'editor-cal': (el) => {
+    const id = saveEditor($('#editor-form'), { offer: false });
+    const i = doc().items[id];
+    if (!calKey(i, el.dataset.kind)) { toast(el.dataset.kind === 'due' ? 'Set a deadline first' : 'Set a time for the block first'); return; }
+    openCalendar(id, el.dataset.kind);
+  },
   'editor-delete': () => {
     const id = state.editingId;
     const before = doc().items[id];
@@ -846,6 +931,8 @@ document.addEventListener('change', (e) => {
     const checks = { ...reviewChecks(rs.periodStart), [el.dataset.step]: el.checked };
     prefs.set('reviewChecks', { period: rs.periodStart, done: checks });
     render();
+  } else if (el.dataset.action === 'cal-offer') {
+    prefs.set('calOffer', el.checked);
   } else if (el.dataset.action === 'review-day') {
     store.updateSettings({ reviewDay: Number(el.value) });
   } else if (el.dataset.action === 'import') {
@@ -900,9 +987,10 @@ document.addEventListener('submit', (e) => {
     const text = val('title');
     if (!text) return;
     const parsed = parseCapture(text, today());
-    store.addItem({ title: parsed.title, list: 'next', projectId: form.dataset.pid, contexts: parsed.contexts, timeMin: parsed.timeMin, energy: parsed.energy, due: parsed.due, start: parsed.start });
+    const added = store.addItem({ title: parsed.title, list: 'next', projectId: form.dataset.pid, contexts: parsed.contexts, timeMin: parsed.timeMin, energy: parsed.energy, due: parsed.due, start: parsed.start, schedDate: parsed.schedDate, schedTime: parsed.schedTime });
     const hint = vagueHint(parsed.title);
     if (hint) toast(hint);
+    else offerCalendar(added.id);
   } else if (kind === 'project-edit') {
     store.updateProject(form.dataset.pid, { title: val('title') || 'Untitled project', outcome: val('outcome'), notes: form.elements.notes.value });
     toast('Project saved');

@@ -22,6 +22,19 @@ It's designed around four ways task systems usually fail:
 - **Upcoming**: real deadlines plus "not before" dates (a tickler). Items with a future start date stay hidden from Now and Next until that day.
 - **Done**: the last 30 days.
 
+## Google Calendar
+
+Two kinds of dated action can go into Google Calendar:
+
+- **Deadline** (`due:fri`): an all-day "Due: …" event.
+- **Time block** (`at:thu-14:00`, or *Block time on / at* in the editor and the clarify step): a timed event that reserves the slot. Its length comes from the action's time estimate (`~90m`), or 1 hour if there isn't one. Today's time blocks appear at the top of **Now** under *Scheduled today*.
+
+After you save a dated action, Clearhead offers **Add**. The editor and the Upcoming view also have *→ Google Calendar* buttons. Each one opens Google Calendar's own new-event form, already filled in with the title, time, notes, project and context. Nothing is sent until you press **Save** there, and Clearhead needs no Google sign-in or setup.
+
+- **Keep them separate (one-time):** in Google Calendar, go to *Settings → Add calendar → Create new calendar* and name it "Clearhead". Then choose it in the event form's calendar dropdown. The pre-filled form can't select it for you.
+- **It's one-way and manual:** changing a date later doesn't move the calendar event. The action shows **Calendar out of date** and offers to re-add it; delete the old event yourself. Completing an action doesn't remove its event.
+- You can turn off the "offer after saving" prompt in Settings → Google Calendar, per device.
+
 ## Daily and weekly rhythm
 
 1. **All day:** capture anything the moment it appears. Don't organise it yet.
@@ -90,6 +103,7 @@ How sync works:
 app/index.html, styles.css        UI shell
 app/js/model.js                   GTD logic: capture parsing, Now ranking, review, merge
 app/js/sweep.js                   weekly-review mind sweep questions
+app/js/calendar.js                Google Calendar links for deadlines and time blocks
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync
 app/js/app.js                     views, clarify wizard, weekly review, shortcuts

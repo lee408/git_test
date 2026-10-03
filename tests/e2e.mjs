@@ -143,6 +143,32 @@ await pc.fill('#editor-form [name="due"]', '2026-12-01');
 await pc.click('#editor-form .btn.primary');
 assert.match(await pc.textContent('#main'), /Due/);
 
+// Google Calendar: a time block from the editor opens a pre-filled event, then tracks changes.
+await pc.context().route('https://calendar.google.com/**', (r) => r.fulfill({ body: 'gcal' }));
+await pc.click('#main .task-body >> text=Buy printer ink');
+await pc.fill('#editor-form [name="schedDate"]', '2026-12-01');
+await pc.fill('#editor-form [name="schedTime"]', '14:30');
+const [gcal] = await Promise.all([pc.context().waitForEvent('page'), pc.click('[data-action="editor-cal"][data-kind="block"]')]);
+const gu = new URL(gcal.url());
+assert.equal(gu.searchParams.get('action'), 'TEMPLATE');
+assert.equal(gu.searchParams.get('text'), 'Buy printer ink');
+assert.equal(gu.searchParams.get('dates'), '20261201T143000/20261201T144500', '15m block from ~15m');
+assert.ok(gu.searchParams.get('ctz'));
+await gcal.close();
+assert.match(await pc.textContent('#main'), /In calendar/);
+await pc.click('#main .task-body >> text=Buy printer ink');
+await pc.fill('#editor-form [name="schedTime"]', '16:00');
+await pc.click('#editor-form .btn.primary');
+assert.match(await pc.textContent('#main'), /Calendar out of date/);
+assert.match(await pc.textContent('#toast'), /Date changed/);
+const [gcal2] = await Promise.all([pc.context().waitForEvent('page'), pc.click('#toast [data-action="undo"]')]);
+assert.match(new URL(gcal2.url()).searchParams.get('dates'), /T160000/);
+await gcal2.close();
+assert.doesNotMatch(await pc.textContent('#main'), /out of date/);
+await pc.keyboard.press('7');
+assert.match(await pc.textContent('#main'), /Add deadline to Google Calendar/);
+await shot(pc, '05b-upcoming-calendar');
+
 // Weekly review.
 await pc.keyboard.press('8');
 await shot(pc, '06-review');
