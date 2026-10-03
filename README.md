@@ -38,15 +38,23 @@ npm run e2e        # browser test incl. two-device sync (needs the playwright pa
 
 There's no build step. `app/` is the whole app.
 
-## Hosting (needed for the Android install)
+## Hosting on Cloudflare Pages
 
-Android needs the app on an HTTPS URL. Any static host works; put the `app/` folder online:
+Android needs the app on an HTTPS address. It's hosted free on Cloudflare Pages, deployed straight from this repo, which can stay private. One-time setup:
 
-- **GitHub Pages:** free. On a free GitHub plan the repo must be public (only the code is public, never your tasks). In repo settings → Pages, deploy from a branch, or add a workflow that publishes `app/`.
-- **Netlify or Cloudflare Pages:** free, and works with a private repo. Set the publish directory to `app`.
-- **Just the PC:** `npm start` and install from `http://localhost:8080`.
+1. Sign in at <https://dash.cloudflare.com> (a free account is fine).
+2. Go to **Workers & Pages → Create → Pages → Connect to Git**, and authorise GitHub for `lee408/git_test` only.
+3. Set up the build:
+   - **Production branch:** `main` (or `claude/custom-task-management-qigkim` until it's merged)
+   - **Framework preset:** None
+   - **Build command:** leave empty
+   - **Build output directory:** `app`
+4. Choose **Save and Deploy**. You get an address like `https://clearhead-xxx.pages.dev/`. Every push to the production branch redeploys automatically.
+5. Add that exact address, with the trailing `/`, as a Redirect URI in your Dropbox app (see below).
 
-When you change app files, bump `VERSION` in `app/sw.js` so installed copies pick up the update.
+`app/_headers` sets a strict content security policy: the page can only talk to itself and Dropbox's API. It also tells browsers to always check for a fresh app shell. When you change app files, bump `VERSION` in `app/sw.js` so installed copies update.
+
+To run it on the PC without hosting: `npm start`, then open `http://localhost:8080`.
 
 ## Install
 
@@ -58,7 +66,7 @@ When you change app files, bump `VERSION` in `app/sw.js` so installed copies pic
 1. Go to <https://www.dropbox.com/developers/apps> → **Create app**.
 2. Choose **Scoped access**, then **App folder**. Name it, e.g. `clearhead-yourname`.
 3. On the **Permissions** tab, tick `files.content.write` and `files.content.read` → **Submit**.
-4. On the **Settings** tab, under *OAuth 2 → Redirect URIs*, add the exact URL shown in Clearhead's Settings → Sync. That's your hosted URL, e.g. `https://you.github.io/clearhead/`, and/or `http://localhost:8080/`.
+4. On the **Settings** tab, under *OAuth 2 → Redirect URIs*, add the exact URL shown in Clearhead's Settings → Sync. That's your Cloudflare address, e.g. `https://clearhead-xxx.pages.dev/`, and/or `http://localhost:8080/`.
 5. Copy the **App key** (not the secret; it isn't needed).
 6. In Clearhead → **Settings → Sync**, paste the app key → **Connect Dropbox** → allow.
 7. Repeat step 6 on each device with the same app key.
@@ -84,5 +92,6 @@ app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync
 app/js/app.js                     views, clarify wizard, weekly review, shortcuts
 app/sw.js, manifest.webmanifest   offline support, install, share target
+app/_headers                      Cloudflare Pages security and cache headers
 tests/                            unit tests + browser end-to-end test
 ```

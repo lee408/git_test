@@ -10,12 +10,24 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../a
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const SHOTS = process.env.SHOTS;
 
+// Apply the same headers Cloudflare Pages will (app/_headers), so the CSP is tested too.
+const HEADERS = [];
+for (const line of fs.readFileSync(path.join(ROOT, '_headers'), 'utf8').split('\n')) {
+  if (!line.trim() || line.trim().startsWith('#')) continue;
+  if (!/^\s/.test(line)) HEADERS.push({ pattern: line.trim(), headers: {} });
+  else { const [k, ...v] = line.trim().split(':'); HEADERS.at(-1).headers[k] = v.join(':').trim(); }
+}
+const headersFor = (p) => Object.assign({}, ...HEADERS
+  .filter(({ pattern }) => (pattern.endsWith('*') ? p.startsWith(pattern.slice(0, -1)) : p === pattern))
+  .map((h) => h.headers));
+
 const server = http.createServer((req, res) => {
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  const urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  let p = urlPath;
   if (p.endsWith('/')) p += 'index.html';
   const file = path.join(ROOT, p);
   if (!file.startsWith(ROOT) || !fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
-  res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', ...headersFor(urlPath) });
   fs.createReadStream(file).pipe(res);
 }).listen(0);
 const BASE = `http://localhost:${server.address().port}/`;
