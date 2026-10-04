@@ -77,6 +77,52 @@ const capture = async (page, text) => { await page.fill('#capture-input', text);
 
 // ---------- Device A: Windows desktop ----------
 const pc = await device('pc', { width: 1280, height: 860 });
+
+// First launch: welcome offers the brain dump; gather card, trigger card, finish, quick sort.
+assert.match(await pc.textContent('#main'), /Welcome to Clearhead/);
+await pc.click('[data-action="dump-start"]');
+assert.match(await pc.textContent('#main .walk-stage'), /Gather/);
+await pc.fill('#walk-text', 'Council tax letter\nOld phone to sell');
+await pc.click('[data-action="walk-next"]');
+await pc.click('[data-action="nav"][data-view="now"]'); // pause
+assert.match(await pc.textContent('#main'), /Brain dump in progress: 2 things/);
+await pc.click('[data-action="dump-start"]'); // resume on card 2
+assert.match(await pc.textContent('#main .sweep-meta'), /Question 2 of/);
+while ((await pc.textContent('#main .walk-stage')).includes('Gather')) await pc.click('[data-action="walk-next"]');
+assert.match(await pc.textContent('#main .label'), /Work/);
+await pc.fill('#walk-text', 'Quarterly report draft\nCancel unused gym membership\nRenovate bathroom\nLearn Italian');
+await pc.click('[data-action="walk-finish"]');
+assert.match(await pc.textContent('#main'), /6 things captured/);
+await shot(pc, '00a-dump-done');
+await pc.click('[data-view="triage"].btn');
+assert.match(await pc.textContent('#main .label'), /Physical stuff/, 'triage shows where an item came from');
+assert.match(await pc.textContent('#main .triage-title'), /Council tax letter/);
+await shot(pc, '00b-quick-sort');
+await pc.keyboard.press('a');                                        // Council tax letter -> keep
+await pc.click('[data-action="triage"][data-to="trash"]');           // Old phone to sell -> trash
+await pc.click('#toast [data-action="undo"]');                       // ...undo
+assert.match(await pc.textContent('#main .triage-title'), /Old phone to sell/);
+await pc.keyboard.press('s');                                        // Old phone -> someday
+await pc.keyboard.press('a');                                        // Quarterly report -> keep
+await pc.keyboard.press('d');                                        // Cancel gym -> done
+await pc.keyboard.press('p');                                        // Renovate bathroom -> project
+await pc.keyboard.press('t');                                        // Learn Italian -> trash
+assert.match(await pc.textContent('#main'), /2 actions left to clarify/);
+assert.match(await pc.textContent('#main'), /1 project still need/);
+const sorted = await pc.evaluate(() => {
+  const d = JSON.parse(localStorage.getItem('clearhead.doc.v1'));
+  const items = Object.values(d.items).filter((i) => !i.deleted);
+  return { inbox: items.filter((i) => i.list === 'inbox' && !i.done).map((i) => i.title).sort(), someday: items.filter((i) => i.list === 'someday').map((i) => i.title),
+    done: items.filter((i) => i.done).map((i) => i.title), projects: Object.values(d.projects).filter((p) => !p.deleted).map((p) => p.title), all: items.length };
+});
+assert.deepEqual(sorted.inbox, ['Council tax letter', 'Quarterly report draft']);
+assert.deepEqual(sorted.someday, ['Old phone to sell']);
+assert.deepEqual(sorted.done, ['Cancel unused gym membership']);
+assert.deepEqual(sorted.projects, ['Renovate bathroom']);
+// Reset to an empty system so the rest of the flow starts from scratch.
+await pc.evaluate(() => { localStorage.removeItem('clearhead.doc.v1'); localStorage.setItem('clearhead.pref.view', '"now"'); });
+await pc.reload();
+assert.doesNotMatch(await pc.textContent('#main'), /Welcome to Clearhead/, 'not offered again once started');
 await capture(pc, 'Sort out car');
 await capture(pc, 'Buy printer ink @errands ~15m');
 await capture(pc, 'Learn Spanish');
@@ -176,19 +222,19 @@ await shot(pc, '06-review');
 // Mind sweep: general card, then the project card files lines under the project.
 await pc.click('[data-action="sweep-start"]');
 assert.match(await pc.textContent('#main'), /What has been on your mind/);
-await pc.fill('#sweep-text', '- Renew passport\n\n* Ring dentist @phone');
-await pc.press('#sweep-text', 'Control+Enter');
+await pc.fill('#walk-text', '- Renew passport\n\n* Ring dentist @phone');
+await pc.press('#walk-text', 'Control+Enter');
 assert.match(await pc.textContent('#main'), /2 things captured/);
 while (!/Car serviced and MOT passed: what's unfinished/.test(await pc.textContent('#main .q'))) {
-  await pc.click('[data-action="sweep-next"]');
+  await pc.click('[data-action="walk-next"]');
 }
 assert.match(await pc.textContent('#main .sweep-hints'), /Call garage to book service/, 'shows current next action');
-await pc.fill('#sweep-text', 'Find V5 logbook');
+await pc.fill('#walk-text', 'Find V5 logbook');
 await shot(pc, '06b-sweep-project');
-await pc.click('[data-action="sweep-next"]');
-await pc.click('[data-action="sweep-back"]');
+await pc.click('[data-action="walk-next"]');
+await pc.click('[data-action="walk-back"]');
 assert.match(await pc.textContent('#main .q'), /Car serviced/, 'back returns to the project card');
-await pc.click('[data-action="sweep-finish"]');
+await pc.click('[data-action="walk-finish"]');
 assert.match(await pc.textContent('#main'), /3 things out of your head/);
 const swept = await pc.evaluate(() => Object.values(JSON.parse(localStorage.getItem('clearhead.doc.v1')).items)
   .filter((i) => i.list === 'inbox' && !i.deleted).map((i) => ({ t: i.title, p: i.projectId, c: i.contexts })));

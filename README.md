@@ -12,6 +12,16 @@ It's designed around four ways task systems usually fail:
 | **Skipping reviews** | From your review day (Monday by default) a banner stays on the Now screen until you finish the **guided weekly review**. That's a 9-step checklist with live counts (inbox, stalled projects, stale waiting-fors) and a week streak. |
 | **Hidden open loops** | The review starts with a **mind sweep**: one guiding question at a time. It covers what's on your mind, the calendar behind and ahead, each active project (showing its outcome, current next action and who you're waiting on), and then work, home and admin, and people and personal. Type one line per thing. Each line goes to the Inbox, and lines under a project card are linked to that project. You can pause and resume it.
 
+## Getting started: the first brain dump
+
+On first launch (an empty app), the Now screen offers a **brain dump**, the big one-off collection GTD starts with. Set aside 1–2 hours. You can pause at any point and **Resume** from Now or Settings. You can re-run it later from Settings → Brain dump; it's worth doing every few months.
+
+1. **Gather your stuff (12 cards):** desk, drawers, wallet and bag, notebooks, post, a walk around your home, email, messages, phone, computer, browser tabs, and your calendar. For each pile, type a line for every thing that needs a decision.
+2. **Empty your head (~40 cards):** a deep trigger list covering Work, Home, Money & admin, Health, People, Errands and Plans, ending with worries and "anything else". One line per thing; shorthand works.
+3. **Quick sort:** one tap (or key) per item: **Action** (A), **Project** (P), **Done** (D), **Someday** (S), **Reference** (R), **Trash** (T), with Undo. Projects go straight into Projects, flagged as needing a first next action. Only the *Action* items stay in the inbox for the full clarify flow.
+
+Quick sort is also offered from the Inbox and Now whenever 10 or more unsorted items pile up.
+
 ## Lists
 
 - **Inbox**: everything you capture, waiting to be clarified.
@@ -103,6 +113,7 @@ How sync works:
 app/index.html, styles.css        UI shell
 app/js/model.js                   GTD logic: capture parsing, Now ranking, review, merge
 app/js/sweep.js                   weekly-review mind sweep questions
+app/js/braindump.js               first brain dump cards and quick-sort choices
 app/js/calendar.js                Google Calendar links for deadlines and time blocks
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync

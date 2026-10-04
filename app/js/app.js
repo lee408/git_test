@@ -5,6 +5,7 @@ import {
 import { store, prefs } from './store.js';
 import { sync } from './sync.js';
 import { buildSweep, splitLines } from './sweep.js';
+import { buildBrainDump, TRIAGE, triagePatch } from './braindump.js';
 import { gcalUrl, calKey, calendarKinds, calendarState, blockLength, blockEnd } from './calendar.js';
 
 // ---------- helpers ----------
@@ -18,6 +19,7 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const TIME_CHOICES = [5, 15, 30, 60, 120];
 const NOW_LIMIT = 5;
+const QUICK_SORT_MIN = 10; // offer one-tap triage once the inbox is this big
 
 function fmtDay(s) {
   const d = daysBetween(today(), s);
@@ -70,7 +72,7 @@ const state = {
   process: null,
   editingId: null,
 };
-if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep'].includes(state.view)) state.view = 'now';
+if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage'].includes(state.view)) state.view = 'now';
 
 function go(view, extra = {}) {
   Object.assign(state, { view, ...extra });
@@ -134,6 +136,21 @@ function header(title, sub = '', actions = '') {
 
 function banners() {
   const out = [];
+  const d = doc();
+  const dump = dumpGet();
+  const empty = !live(d.items).length && !live(d.projects).length;
+  if (empty && !dump.started && !prefs.get('dumpDismissed', false)) {
+    out.push(`<div class="welcome"><h2>Welcome to Clearhead</h2>
+      <p>GTD starts with one big <strong>brain dump</strong>: gathering every pile of stuff and every open loop in your head into one inbox, then sorting it. Set aside 1–2 hours. You can pause any time and pick up where you left off.</p>
+      <ol class="plain"><li><strong>Gather</strong> the physical and digital piles (desk, email, phone, tabs…)</li>
+      <li><strong>Empty your head</strong> with ~40 guided prompts across work, home, money, health, people and plans</li>
+      <li><strong>Quick sort</strong> everything with one tap each, then clarify the real actions</li></ol>
+      <div class="row"><button class="btn primary" data-action="dump-start">Start brain dump</button>
+      <button class="link" data-action="dump-dismiss">Skip, I'll add things as I go</button></div></div>`);
+  } else if (dump.started && !dump.finished) {
+    out.push(`<div class="banner"><span><strong>Brain dump in progress</strong>: ${plural(dump.captured, 'thing')} captured so far.</span>
+      <button class="btn primary" data-action="dump-start">Resume</button></div>`);
+  }
   const inbox = inboxItems(doc()).length;
   const rs = reviewStatus(doc(), today());
   if (rs.due) {
@@ -141,8 +158,10 @@ function banners() {
     out.push(`<div class="banner review"><span><strong>Weekly review is due</strong> (${when}). 30 minutes now keeps the whole system trustworthy.</span>
       <button class="btn primary" data-action="nav" data-view="review">Start review</button></div>`);
   }
+  const untriaged = inboxItems(d).filter((i) => !i.triaged).length;
   if (inbox > 0) {
     out.push(`<div class="banner"><span><strong>${plural(inbox, 'item')}</strong> in your inbox to clarify.</span>
+      ${untriaged >= QUICK_SORT_MIN ? `<button class="btn" data-action="nav" data-view="triage">Quick sort</button>` : ''}
       <button class="btn" data-action="process-start">Process</button></div>`);
   }
   return out.join('');
@@ -189,8 +208,9 @@ views.now = () => {
 views.inbox = () => {
   if (state.process) return processView();
   const items = inboxItems(doc());
+  const untriaged = items.filter((i) => !i.triaged).length;
   return `${header('Inbox', 'Capture now, decide later. Process to zero at least once a day.',
-    items.length ? '<button class="btn primary" data-action="process-start">Process inbox</button>' : '')}
+    items.length ? `<div class="row">${untriaged >= QUICK_SORT_MIN ? `<button class="btn" data-action="nav" data-view="triage">Quick sort (${untriaged})</button>` : ''}<button class="btn primary" data-action="process-start">Process inbox</button></div>` : '')}
     ${items.length ? taskList(items) : empty('Inbox zero. Your head is clear.')}`;
 };
 
@@ -381,67 +401,163 @@ function reviewChecks(periodStart) {
   return saved.period === periodStart ? saved.done : {};
 }
 
-// ---------- mind sweep (weekly review step 1) ----------
-// Progress is per device and per review period, so it can be paused and resumed.
+// ---------- guided capture walkthroughs: weekly mind sweep + first brain dump ----------
+// One question card at a time; each typed line becomes an inbox item. Progress is saved per
+// device so a walk can be paused and resumed. The weekly sweep resets every review period.
 function sweepGet(period) {
   const s = prefs.get('sweep', null);
   return s && s.period === period ? s : { period, id: null, captured: 0, finished: false };
 }
 
-function sweepContext() {
-  const period = reviewStatus(doc(), today()).periodStart;
-  const sw = sweepGet(period);
-  const cards = buildSweep(doc(), today());
-  const i = Math.max(0, cards.findIndex((c) => c.id === sw.id));
-  return { sw, cards, i };
+function dumpGet() {
+  return prefs.get('dump', null) || { id: null, captured: 0, finished: false, started: false };
 }
 
-views.sweep = () => {
-  const { sw, cards, i } = sweepContext();
-  if (sw.finished) {
-    const inbox = inboxItems(doc()).length;
-    return `${header('Mind sweep')}
-      <div class="wizard done-card"><p class="big-emoji">✓</p>
-        <p><strong>${plural(sw.captured, 'thing')} out of your head.</strong> Nothing to remember now: it's all in the inbox.</p>
-        <div class="row center">${inbox ? `<button class="btn primary" data-action="process-start">Process inbox (${inbox})</button>` : ''}
-        <button class="btn" data-action="nav" data-view="review">Back to review</button></div></div>`;
-  }
+const WALKS = {
+  sweep: {
+    title: 'Mind sweep',
+    intro: 'Write down everything each question brings up, one line each. Don\'t judge or organise yet; that comes when you process the inbox.',
+    pauseView: 'review',
+    load: () => ({ st: sweepGet(reviewStatus(doc(), today()).periodStart), cards: buildSweep(doc(), today()) }),
+    save: (st) => prefs.set('sweep', st),
+    onFinish: () => {
+      const rs = reviewStatus(doc(), today());
+      prefs.set('reviewChecks', { period: rs.periodStart, done: { ...reviewChecks(rs.periodStart), loose: true } });
+    },
+    done: (st) => {
+      const inbox = inboxItems(doc()).length;
+      return `${header('Mind sweep')}
+        <div class="wizard done-card"><p class="big-emoji">✓</p>
+          <p><strong>${plural(st.captured, 'thing')} out of your head.</strong> Nothing to remember now: it's all in the inbox.</p>
+          <div class="row center">${inbox ? `<button class="btn primary" data-action="process-start">Process inbox (${inbox})</button>` : ''}
+          <button class="btn" data-action="nav" data-view="review">Back to review</button></div></div>`;
+    },
+  },
+  dump: {
+    title: 'Brain dump',
+    intro: 'Get every commitment, idea and open loop out of your head and your piles. Don\'t decide anything yet. One line per thing, and expect 100+ items.',
+    pauseView: 'now',
+    load: () => ({ st: dumpGet(), cards: buildBrainDump() }),
+    save: (st) => prefs.set('dump', { ...st, started: true }),
+    stageLabel: (c) => (c.stage === 'gather' ? 'Step 1 of 2 · Gather your stuff' : 'Step 2 of 2 · Empty your head'),
+    done: (st) => {
+      const untriaged = inboxItems(doc()).filter((i) => !i.triaged).length;
+      return `${header('Brain dump complete')}
+        <div class="wizard done-card"><p class="big-emoji">✓</p>
+          <p><strong>${plural(st.captured, 'thing')} captured.</strong> That's the hardest part done. Everything you've been carrying is now in one place.</p>
+          <p class="hint">Next, a quick sort: one tap per item to bin, park or keep it. Then only the real actions get the full clarify treatment. You can do it in several sittings.</p>
+          <div class="row center">${untriaged ? `<button class="btn primary" data-action="nav" data-view="triage">Quick sort ${untriaged} items</button>` : '<button class="btn primary" data-action="process-start">Process inbox</button>'}
+          <button class="btn" data-action="nav" data-view="now">Later</button></div></div>`;
+    },
+  },
+};
+
+function walkContext(key) {
+  const { st, cards } = WALKS[key].load();
+  const i = Math.max(0, cards.findIndex((c) => c.id === st.id));
+  return { st, cards, i };
+}
+
+function walkView(key) {
+  const w = WALKS[key];
+  const { st, cards, i } = walkContext(key);
+  if (st.finished) return w.done(st);
   const c = cards[i];
-  return `${header('Mind sweep', 'Write down everything each question brings up, one line each. Don\'t judge or organise yet; that comes when you process the inbox.')}
-    <progress class="sweep-progress" max="${cards.length}" value="${i}" aria-label="Mind sweep progress"></progress>
-    <p class="sweep-meta"><span>Question ${i + 1} of ${cards.length}</span><span>${plural(sw.captured, 'thing')} captured</span></p>
+  return `${header(w.title, w.intro)}
+    ${w.stageLabel ? `<p class="walk-stage">${esc(w.stageLabel(c))}</p>` : ''}
+    <progress class="sweep-progress" max="${cards.length}" value="${i}" aria-label="${w.title} progress"></progress>
+    <p class="sweep-meta"><span>Question ${i + 1} of ${cards.length}</span><span>${plural(st.captured, 'thing')} captured</span></p>
     <div class="wizard sweep-card">
       <span class="label">${esc(c.area)}${c.stalled ? ' · <span class="bad-text">no next action</span>' : ''}</span>
       <h2 class="q">${esc(c.q)}</h2>
       <ul class="sweep-hints">${c.hints.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>
-      <label class="sr-only" for="sweep-text">Your answers, one per line</label>
-      <textarea id="sweep-text" rows="5" placeholder="One per line…${c.projectId ? ' (filed under this project)' : ''}" autofocus></textarea>
+      <label class="sr-only" for="walk-text">Your answers, one per line</label>
+      <textarea id="walk-text" data-walk="${key}" rows="5" placeholder="One per line…${c.projectId ? ' (filed under this project)' : ''}" autofocus></textarea>
       <p class="hint">Each line becomes an inbox item. Shorthand works (@phone ~15m due:fri).<span class="desktop-only"> <kbd>Ctrl</kbd>+<kbd>Enter</kbd> for next.</span></p>
-      <div class="choices"><button class="btn primary" data-action="sweep-next">${i + 1 < cards.length ? 'Next question →' : 'Finish sweep'}</button></div>
-      <div class="wizard-nav">${i > 0 ? '<button class="link" data-action="sweep-back">← Back</button>' : '<span></span>'}
-        <span><button class="link" data-action="sweep-finish">Finish now</button> · <button class="link" data-action="nav" data-view="review">Pause</button></span></div>
+      <div class="choices"><button class="btn primary" data-action="walk-next" data-walk="${key}">${i + 1 < cards.length ? 'Next →' : `Finish ${w.title.toLowerCase()}`}</button></div>
+      <div class="wizard-nav">${i > 0 ? `<button class="link" data-action="walk-back" data-walk="${key}">← Back</button>` : '<span></span>'}
+        <span><button class="link" data-action="walk-finish" data-walk="${key}">Finish now</button> · <button class="link" data-action="nav" data-view="${w.pauseView}">Pause</button></span></div>
     </div>`;
-};
+}
+
+views.sweep = () => walkView('sweep');
+views.dump = () => walkView('dump');
 
 // Captures whatever is typed on the current card, then moves by `delta` cards (or finishes).
-function sweepMove(delta, { finish = false } = {}) {
-  const { sw, cards, i } = sweepContext();
-  const card = cards[i];
-  const lines = splitLines($('#sweep-text')?.value);
-  for (const line of lines) capture(line, '', { projectId: card.projectId || null });
-  sw.captured += lines.length;
+function walkMove(key, delta, { finish = false } = {}) {
+  const w = WALKS[key];
+  const { st, cards, i } = walkContext(key);
+  const c = cards[i];
+  const lines = splitLines($('#walk-text')?.value);
+  for (const line of lines) capture(line, '', { projectId: c.projectId || null, src: c.area });
+  st.captured += lines.length;
   const to = i + delta;
   if (finish || to >= cards.length) {
-    sw.finished = true;
-    const rs = reviewStatus(doc(), today());
-    prefs.set('reviewChecks', { period: rs.periodStart, done: { ...reviewChecks(rs.periodStart), loose: true } });
+    st.finished = true;
+    w.onFinish?.();
   } else {
-    sw.id = cards[Math.max(0, to)].id;
+    st.id = cards[Math.max(0, to)].id;
   }
-  prefs.set('sweep', sw);
+  w.save(st);
   if (lines.length) toast(`${plural(lines.length, 'item')} added to Inbox`);
   render();
   window.scrollTo(0, 0);
+}
+
+function startWalk(key) {
+  const { st } = WALKS[key].load();
+  if (st.finished) WALKS[key].save({ ...st, id: null, captured: 0, finished: false });
+  go(key);
+}
+
+// ---------- quick sort (triage) for a big inbox ----------
+let lastTriage = null;
+
+views.triage = () => {
+  const all = inboxItems(doc());
+  const left = all.filter((i) => !i.triaged);
+  if (!left.length) {
+    const newProjects = live(doc().projects).filter((p) => projectHealth(doc(), p, today()).stalled).length;
+    return `${header('Quick sort done')}
+      <div class="wizard done-card"><p class="big-emoji">✓</p>
+        <p><strong>${all.length ? `${plural(all.length, 'action')} left to clarify.` : 'Inbox empty.'}</strong></p>
+        ${newProjects ? `<p class="hint">${plural(newProjects, 'project')} still need a first next action. You'll find them at the top of Projects.</p>` : ''}
+        <div class="row center">${all.length ? '<button class="btn primary" data-action="process-start">Clarify actions</button>' : ''}
+        ${newProjects ? '<button class="btn" data-action="nav" data-view="projects">Projects</button>' : ''}
+        <button class="btn" data-action="nav" data-view="now">Done for now</button></div></div>`;
+  }
+  const item = left[0];
+  return `${header('Quick sort', 'One tap each. Don\'t think hard: if it needs thought, it\'s an Action or a Project.')}
+    <progress class="sweep-progress" max="${all.length}" value="${all.length - left.length}" aria-label="Quick sort progress"></progress>
+    <p class="sweep-meta"><span>${plural(left.length, 'item')} left</span><span>${all.length - left.length} kept for clarifying</span></p>
+    <div class="wizard triage-card" data-id="${item.id}">
+      ${item.src ? `<span class="label">${esc(item.src)}</span>` : ''}
+      <p class="triage-title">${esc(item.title)}</p>
+      <div class="triage-grid">${TRIAGE.map((t) => `<button class="btn ${t.to === 'keep' ? 'primary' : t.to === 'trash' ? 'danger' : ''}" data-action="triage" data-to="${t.to}">
+        <span>${t.label}<kbd class="desktop-only">${t.key.toUpperCase()}</kbd></span><small>${t.help}</small></button>`).join('')}</div>
+      <div class="wizard-nav"><button class="link" data-action="edit">Edit wording</button><button class="link" data-action="nav" data-view="now">Pause</button></div>
+    </div>`;
+};
+
+function triage(id, to) {
+  const before = doc().items[id];
+  if (!before) return;
+  let projectId = null;
+  if (to === 'trash') store.deleteItem(id);
+  else if (to === 'project') {
+    projectId = store.addProject({ title: before.title }).id;
+    store.deleteItem(id);
+  } else store.updateItem(id, triagePatch(to));
+  lastTriage = { before, projectId };
+  const label = TRIAGE.find((t) => t.to === to).label;
+  toast(to === 'keep' ? 'Kept for clarifying' : `${label}: ${before.title}`, undoTriage);
+}
+
+function undoTriage() {
+  if (!lastTriage) return;
+  if (lastTriage.projectId) store.deleteProject(lastTriage.projectId);
+  store.restoreItem(lastTriage.before);
+  lastTriage = null;
 }
 
 views.done = () => {
@@ -492,6 +608,11 @@ views.settings = () => {
         <p class="hint">Redirect URI to register in the Dropbox console: <code>${esc(sync.redirectUri())}</code></p>
         <button class="btn primary">Connect Dropbox</button></form>
         ${st.state === 'error' ? `<p class="bad-text">${esc(st.message)}</p>` : ''}`}
+    </section>
+    <section class="card"><h2>Brain dump</h2>
+      ${(() => { const dmp = dumpGet(); return `<p class="hint">The full GTD collection: gather every pile, then ~40 prompts to empty your head, then a one-tap quick sort. Worth redoing every few months, or whenever life feels out of control.${dmp.started ? ` ${dmp.finished ? 'Last run' : 'In progress'}: ${plural(dmp.captured, 'thing')} captured.` : ''}</p>
+      <div class="row"><button class="btn primary" data-action="dump-start">${dmp.started && !dmp.finished ? 'Resume brain dump' : 'Start brain dump'}</button>
+      <button class="btn" data-action="nav" data-view="triage">Quick sort inbox</button></div>`; })()}
     </section>
     <section class="card"><h2>Google Calendar</h2>
       <p class="hint">Actions with a deadline or a time block get an "Add to Google Calendar" button (in the editor and in Upcoming). It opens Google Calendar with the event filled in. Nothing is sent until you press Save there, and no sign-in to Clearhead is needed.</p>
@@ -732,13 +853,13 @@ function capturePreview() {
   $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('');
 }
 
-function capture(text, notes = '', { projectId: defaultProject = null } = {}) {
+function capture(text, notes = '', { projectId: defaultProject = null, src = null } = {}) {
   const p = parseCapture(text, today());
   if (!p.title) return null;
   const projectId = p.project ? store.findOrCreateProject(p.project).id : defaultProject;
   return store.addItem({
     title: p.title, notes, contexts: p.contexts, projectId, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start,
-    schedDate: p.schedDate, schedTime: p.schedTime,
+    schedDate: p.schedDate, schedTime: p.schedTime, ...(src ? { src } : {}),
   });
 }
 
@@ -770,7 +891,7 @@ function render() {
     waiting: openItems(d).filter((i) => i.list === 'waiting').length,
     review: reviewStatus(d, t).due ? '!' : '',
   };
-  const navView = { project: 'projects', sweep: 'review' }[state.view] || state.view;
+  const navView = { project: 'projects', sweep: 'review', dump: 'now', triage: 'inbox' }[state.view] || state.view;
   $('#sidenav').innerHTML = VIEWS.map((v) => `<button class="${navView === v.id ? 'active' : ''}" data-action="nav" data-view="${v.id}" title="${v.label} (${v.key})">
       ${icon(v.id)}<span>${v.label}</span>${counts[v.id] ? `<span class="badge ${v.id === 'projects' || v.id === 'review' ? 'warn' : ''}">${counts[v.id]}</span>` : ''}</button>`).join('');
   const moreActive = !MOBILE_TABS.includes(navView);
@@ -851,14 +972,13 @@ const actions = {
   },
   'p-time': (el) => { readDraft(); const m = Number(el.dataset.min); state.process.draft.timeMin = state.process.draft.timeMin === m ? null : m; render(); },
   'p-energy': (el) => { readDraft(); const e = el.dataset.energy; state.process.draft.energy = state.process.draft.energy === e ? null : e; render(); },
-  'sweep-start': () => {
-    const period = reviewStatus(doc(), today()).periodStart;
-    if (sweepGet(period).finished) prefs.set('sweep', { period, id: null, captured: 0, finished: false });
-    go('sweep');
-  },
-  'sweep-next': () => sweepMove(1),
-  'sweep-back': () => sweepMove(-1),
-  'sweep-finish': () => sweepMove(0, { finish: true }),
+  'sweep-start': () => startWalk('sweep'),
+  'dump-start': () => startWalk('dump'),
+  'dump-dismiss': () => { prefs.set('dumpDismissed', true); render(); },
+  'walk-next': (el) => walkMove(el.dataset.walk, 1),
+  'walk-back': (el) => walkMove(el.dataset.walk, -1),
+  'walk-finish': (el) => walkMove(el.dataset.walk, 0, { finish: true }),
+  triage: (el, id) => triage(id, el.dataset.to),
   'review-finish': () => {
     store.completeReview(today());
     prefs.set('reviewChecks', null);
@@ -1011,10 +1131,15 @@ document.addEventListener('focusout', () => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.id === 'sweep-text' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sweepMove(1); return; }
+  if (e.target.id === 'walk-text' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); walkMove(e.target.dataset.walk, 1); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (e.key === 'Escape' && e.target.id === 'capture-input') { e.target.blur(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey || $('#editor').open) return;
+  if (state.view === 'triage') {
+    const t = TRIAGE.find((x) => x.key === e.key.toLowerCase()) || (e.key === 'Enter' && TRIAGE[0]);
+    const id = $('.triage-card')?.dataset.id;
+    if (t && id) { e.preventDefault(); triage(id, t.to); return; }
+  }
   if (e.key === 'n' || e.key === '/') { e.preventDefault(); $('#capture-input').focus(); return; }
   if (e.key === 'p') { processStart(); return; }
   const v = VIEWS.find((x) => x.key === e.key);

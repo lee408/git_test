@@ -1,8 +1,8 @@
 // Offline app shell. Bump VERSION whenever app files change.
-const VERSION = 'clearhead-v3';
+const VERSION = 'clearhead-v4';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/model.js', 'js/store.js', 'js/sync.js', 'js/sweep.js', 'js/calendar.js',
+  'js/app.js', 'js/model.js', 'js/store.js', 'js/sync.js', 'js/sweep.js', 'js/calendar.js', 'js/braindump.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
