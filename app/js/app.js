@@ -6,6 +6,8 @@ import { store, prefs } from './store.js';
 import { sync } from './sync.js';
 import { buildSweep, splitLines } from './sweep.js';
 import { buildBrainDump, TRIAGE, triagePatch } from './braindump.js';
+import { push, saveSnapshot, parseTimes } from './push.js';
+import { quoteOfDay } from './quotes.js';
 import { gcalUrl, calKey, calendarKinds, calendarState, blockLength, blockEnd } from './calendar.js';
 
 // ---------- helpers ----------
@@ -71,6 +73,7 @@ const state = {
   nextFilter: prefs.get('nextFilter', null),
   process: null,
   editingId: null,
+  pushMsg: '',
 };
 if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage'].includes(state.view)) state.view = 'now';
 
@@ -202,7 +205,8 @@ views.now = () => {
     : 'No next actions yet. Capture something above, then process your inbox.')}
     ${hidden > 0 ? `<button class="link more" data-action="now-all">Show ${hidden} more that also fit</button>` : ''}
     ${state.showAllNow && suggestions.length > NOW_LIMIT ? '<button class="link more" data-action="now-all">Show fewer</button>' : ''}
-    ${overdueWaiting ? `<p class="hint">${plural(overdueWaiting, 'item')} waiting more than a week. <button class="link" data-action="nav" data-view="waiting">Follow up?</button></p>` : ''}`;
+    ${overdueWaiting ? `<p class="hint">${plural(overdueWaiting, 'item')} waiting more than a week. <button class="link" data-action="nav" data-view="waiting">Follow up?</button></p>` : ''}
+    ${(([text, author]) => `<figure class="daily-quote"><blockquote>${esc(text)}</blockquote><figcaption>${esc(author)}</figcaption></figure>`)(quoteOfDay(t))}`;
 };
 
 views.inbox = () => {
@@ -614,6 +618,7 @@ views.settings = () => {
       <div class="row"><button class="btn primary" data-action="dump-start">${dmp.started && !dmp.finished ? 'Resume brain dump' : 'Start brain dump'}</button>
       <button class="btn" data-action="nav" data-view="triage">Quick sort inbox</button></div>`; })()}
     </section>
+    ${pushCard()}
     <section class="card"><h2>Google Calendar</h2>
       <p class="hint">Actions with a deadline or a time block get an "Add to Google Calendar" button (in the editor and in Upcoming). It opens Google Calendar with the event filled in. Nothing is sent until you press Save there, and no sign-in to Clearhead is needed.</p>
       <p class="hint"><strong>Tip:</strong> keep these events separate. In Google Calendar, go to Settings → Add calendar → Create new calendar, name it "Clearhead", then pick it in the event form's calendar dropdown.</p>
@@ -635,6 +640,47 @@ views.settings = () => {
       <ul class="plain"><li><kbd>N</kbd> or <kbd>/</kbd> capture · <kbd>P</kbd> process inbox · <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> switch views · <kbd>Esc</kbd> close</li></ul>
     </section>`;
 };
+
+function pushSummary(c = push.config) {
+  const label = { morning: 'Morning plan', evening: 'Evening shutdown', quote: 'Quote' };
+  const s = push.schedule(c);
+  return s.length ? s.map((x) => `${label[x.kind]} ${x.time}`).join(' · ') : 'no reminders selected';
+}
+
+function pushCard() {
+  if (!push.supported) {
+    return `<section class="card" id="push-settings"><h2>Notifications</h2>
+      <p class="hint">This browser can't receive push notifications. Use Chrome with the app installed on Android, or Chrome/Edge on Windows.</p></section>`;
+  }
+  const c = push.config;
+  const on = push.enabled;
+  const perm = Notification.permission;
+  return `<section class="card" id="push-settings"><h2>Notifications</h2>
+    <p class="hint">Daily reminders and encouragement on the devices you choose: set them up on each device. They are sent by your own Cloudflare push worker (see README). It stores only this device's push address and times; the message text is written on this device from your own data.</p>
+    ${perm === 'denied' ? '<p class="bad-text">Notifications are blocked for this app. Allow them in your browser or Android settings first.</p>' : ''}
+    <form data-form="push" autocomplete="off">
+      <div class="grid2"><label>Push server<input name="server" value="${esc(push.server)}" placeholder="https://clearhead-push.you.workers.dev" inputmode="url" spellcheck="false"></label>
+      <label>Access key<input name="key" type="password" value="${esc(push.key)}"></label></div>
+      <label>This device's name<input name="name" value="${esc(c.name)}" placeholder="e.g. Pixel, Work PC"></label>
+      <div class="push-row"><label class="review-check"><input type="checkbox" name="morningOn" ${c.morning.on ? 'checked' : ''}><span>Morning plan</span></label>
+        <input type="time" name="morningTime" value="${esc(c.morning.time)}" aria-label="Morning plan time"></div>
+      <div class="push-row"><label class="review-check"><input type="checkbox" name="eveningOn" ${c.evening.on ? 'checked' : ''}><span>Evening shutdown</span></label>
+        <input type="time" name="eveningTime" value="${esc(c.evening.time)}" aria-label="Evening shutdown time"></div>
+      <div class="push-row"><label class="review-check"><input type="checkbox" name="quotesOn" ${c.quotes.on ? 'checked' : ''}><span>Encouragement quotes at</span></label>
+        <input name="quoteTimes" value="${esc(c.quotes.times.join(', '))}" placeholder="09:00, 15:00" aria-label="Quote times"></div>
+      <div class="row"><button class="btn primary">${on ? 'Save changes' : 'Turn on for this device'}</button>
+        ${on ? `<button type="button" class="btn" data-action="push-test" data-kind="morning">Test morning</button>
+        <button type="button" class="btn" data-action="push-test" data-kind="quote">Test quote</button>
+        <button type="button" class="btn danger" data-action="push-disable">Turn off</button>` : ''}</div>
+    </form>
+    <p class="hint push-status" aria-live="polite">${esc(state.pushMsg || (on ? `On for this device: ${pushSummary(c)}.` : ''))}</p>
+  </section>`;
+}
+
+function pushStatus(msg) {
+  state.pushMsg = msg;
+  if (state.view === 'settings') render();
+}
 
 // ---------- clarify / process wizard ----------
 function processStart() {
@@ -1012,6 +1058,16 @@ const actions = {
   },
   'editor-cancel': () => $('#editor').close(),
   'cal-add': (el, id) => openCalendar(id, el.dataset.kind),
+  'push-test': (el) => {
+    pushStatus('Sending a test…');
+    push.test(el.dataset.kind)
+      .then((r) => pushStatus(r.ok ? 'Test sent. It should arrive within a few seconds.' : `The push service answered ${r.status}. Try turning notifications off and on again.`))
+      .catch((e) => pushStatus(e.message));
+  },
+  'push-disable': () => {
+    pushStatus('Turning off…');
+    push.disable().then(() => { pushStatus('Off for this device.'); toast('Notifications turned off on this device'); });
+  },
   'editor-cal': (el) => {
     const id = saveEditor($('#editor-form'), { offer: false });
     const i = doc().items[id];
@@ -1120,6 +1176,21 @@ document.addEventListener('submit', (e) => {
     state.now.contexts = state.now.contexts.filter((c) => list.includes(c));
     prefs.set('nowCtx', state.now);
     toast('Contexts saved');
+  } else if (kind === 'push') {
+    const f = form.elements;
+    const server = val('server').replace(/\/+$/, '');
+    if (server !== push.server || val('key') !== push.key) store.updateSettings({ pushServer: server, pushKey: val('key') });
+    const times = parseTimes(val('quoteTimes'));
+    push.config = {
+      name: val('name'),
+      morning: { on: f.morningOn.checked, time: f.morningTime.value || '07:30' },
+      evening: { on: f.eveningOn.checked, time: f.eveningTime.value || '18:00' },
+      quotes: { on: f.quotesOn.checked && times.length > 0, times: times.length ? times : ['12:30'] },
+    };
+    pushStatus('Connecting…');
+    push.enable()
+      .then(() => { pushStatus(`On for this device: ${pushSummary()}.`); toast('Notifications set for this device'); })
+      .catch((e) => pushStatus(e.message));
   } else if (kind === 'dropbox') {
     sync.appKey = val('appKey');
     sync.connect().catch((err) => toast(err.message));
@@ -1150,6 +1221,7 @@ $('#editor').addEventListener('close', () => { state.editingId = null; });
 
 // ---------- startup ----------
 store.subscribe(({ local }) => {
+  saveSnapshot(store.doc);
   if (!local && isEditingMain()) deferredRender = true;
   else render();
   if (local) sync.schedule();
@@ -1182,13 +1254,14 @@ async function start() {
     processStart();
   }
   render();
+  saveSnapshot(store.doc);
   sync.run();
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); sync.run(); } });
   addEventListener('online', () => sync.run());
   setInterval(() => { if (document.visibilityState === 'visible') sync.run(); }, 5 * 60 * 1000);
   navigator.storage?.persist?.().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+    navigator.serviceWorker.register('sw.js', { type: 'module' }).catch((e) => console.warn('SW registration failed', e));
   }
 }
 

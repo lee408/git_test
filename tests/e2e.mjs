@@ -300,6 +300,99 @@ await phone.waitForTimeout(300);
 await phone.click('.tabbar [data-view="inbox"]');
 assert.match(await phone.textContent('#main'), /Article/);
 
+// ---------- Push notifications: real service worker, mocked push server ----------
+{
+  const { generateKeyPairSync } = await import('node:crypto');
+  const vapidPub = generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ format: 'jwk' });
+  const vapidRaw = Buffer.concat([Buffer.from([4]), Buffer.from(vapidPub.x, 'base64url'), Buffer.from(vapidPub.y, 'base64url')]).toString('base64url');
+  // The lightweight headless shell always denies notifications; full Chromium (new headless) allows them.
+  const fullBrowser = await chromium.launch(process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : { channel: 'chromium' });
+  const ctx = await fullBrowser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.grantPermissions(['notifications'], { origin: BASE.replace(/\/$/, '') });
+  // Headless Chromium has no push service, so stand in for the browser's subscription.
+  await ctx.addInitScript(() => {
+    const fake = { endpoint: 'https://fcm.googleapis.com/fcm/send/e2e', options: {}, toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'BPUB', auth: 'AUTH' } }; }, unsubscribe: async () => true };
+    PushManager.prototype.subscribe = async function (opts) { window.__subscribeOpts = opts; return fake; };
+    PushManager.prototype.getSubscription = async () => null;
+  });
+  const reqs = [];
+  await ctx.route('https://test-push.workers.dev/**', async (route) => {
+    const r = route.request();
+    reqs.push({ method: r.method(), path: new URL(r.url()).pathname, auth: r.headers().authorization, body: r.postData() && JSON.parse(r.postData()) });
+    if (r.method() === 'GET') return route.fulfill({ json: { publicKey: vapidRaw }, headers: { 'Access-Control-Allow-Origin': '*' } });
+    return route.fulfill({ json: { ok: true, status: 201 }, headers: { 'Access-Control-Allow-Origin': '*' } });
+  });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => errors.push(`push: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`push: ${m.text()}`); });
+  await page.goto(BASE);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  assert.match(await page.textContent('.daily-quote figcaption'), /\w/, 'quote of the day on Now');
+
+  // Some data for the morning plan.
+  await capture(page, 'Draft report at:07:00 ~30m');
+  await capture(page, 'Pay invoice due:today');
+
+  await page.click('.tabbar [data-view="more"]');
+  await page.click('#main [data-view="settings"]');
+  await page.fill('#push-settings [name="server"]', 'https://test-push.workers.dev/');
+  await page.fill('#push-settings [name="key"]', 'my-secret');
+  await page.fill('#push-settings [name="name"]', 'Pixel');
+  await page.fill('#push-settings [name="morningTime"]', '07:15');
+  await page.uncheck('#push-settings [name="eveningOn"]');
+  await page.fill('#push-settings [name="quoteTimes"]', '9:00, 15:30, nonsense');
+  await page.click('#push-settings .btn.primary');
+  await page.waitForFunction(() => /On for this device/.test(document.querySelector('.push-status')?.textContent));
+  assert.match(await page.textContent('.push-status'), /Morning plan 07:15 · Quote 09:00 · Quote 15:30/);
+  const put = reqs.find((r) => r.method === 'PUT');
+  assert.match(put.path, /^\/api\/devices\/dev-/);
+  assert.equal(put.auth, 'Bearer my-secret');
+  assert.equal(put.body.name, 'Pixel');
+  assert.ok(put.body.tz);
+  assert.deepEqual(put.body.schedule, [{ kind: 'morning', time: '07:15' }, { kind: 'quote', time: '09:00' }, { kind: 'quote', time: '15:30' }]);
+  assert.equal(put.body.subscription.endpoint, 'https://fcm.googleapis.com/fcm/send/e2e');
+  assert.equal(await page.evaluate(() => window.__subscribeOpts.applicationServerKey.byteLength), 65);
+  await page.click('[data-action="push-test"][data-kind="quote"]');
+  await page.waitForFunction(() => /Test sent/.test(document.querySelector('.push-status')?.textContent));
+  assert.deepEqual(reqs.at(-1).body, { kind: 'quote' });
+  await shot(page, '09-notifications-settings');
+
+  // Deliver real push events to the service worker and read the notifications it shows.
+  await page.waitForTimeout(1300); // snapshot debounce
+  const cdp = await ctx.newCDPSession(page);
+  const regId = new Promise((resolve) => cdp.on('ServiceWorker.workerRegistrationUpdated', ({ registrations }) => {
+    const r = registrations.find((x) => !x.isDeleted); if (r) resolve(r.registrationId);
+  }));
+  await cdp.send('ServiceWorker.enable');
+  const registrationId = await regId;
+  const origin = new URL(BASE).origin;
+  const shown = async (tag) => page.evaluate(async (t) => {
+    for (let i = 0; i < 50; i++) {
+      const ns = await (await navigator.serviceWorker.ready).getNotifications({ tag: t });
+      if (ns.length) return ns.map((n) => ({ title: n.title, body: n.body, url: n.data?.url }));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return [];
+  }, tag);
+  await cdp.send('ServiceWorker.deliverPushMessage', { origin, registrationId, data: JSON.stringify({ kind: 'morning' }) });
+  const [morning] = await shown('clearhead-morning');
+  assert.equal(morning.title, "Good morning. Here's your day");
+  assert.match(morning.body, /Blocks: 07:00 Draft report/);
+  assert.match(morning.body, /Due: Pay invoice/);
+  await cdp.send('ServiceWorker.deliverPushMessage', { origin, registrationId, data: JSON.stringify({ kind: 'quote' }) });
+  const [quote] = await shown('clearhead-quote');
+  assert.match(quote.body, /^“.+” \(.+\)$/);
+  await cdp.send('ServiceWorker.deliverPushMessage', { origin, registrationId, data: JSON.stringify({ kind: 'evening' }) });
+  const [evening] = await shown('clearhead-evening');
+  assert.equal(evening.title, 'Shutdown time');
+  assert.equal(new URL(evening.url, BASE).search, '?capture=1');
+
+  await page.click('[data-action="push-disable"]');
+  await page.waitForFunction(() => /Off for this device/.test(document.querySelector('.push-status')?.textContent));
+  assert.equal(reqs.at(-1).method, 'DELETE');
+  await fullBrowser.close();
+}
+
 assert.deepEqual(errors, []);
 console.log('E2E OK');
 await browser.close();

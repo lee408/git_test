@@ -1,0 +1,14 @@
+# Optional: deploy with the Wrangler CLI instead of the dashboard (see README "Push notifications").
+#   npx wrangler kv namespace create DEVICES   -> paste the id below
+#   npx wrangler secret put CLEARHEAD_KEY      -> any long random string; enter the same in the app
+#   npx wrangler deploy
+name = "clearhead-push"
+main = "clearhead-push.js"
+compatibility_date = "2025-01-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "DEVICES"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

@@ -45,6 +45,41 @@ After you save a dated action, Clearhead offers **Add**. The editor and the Upco
 - **It's one-way and manual:** changing a date later doesn't move the calendar event. The action shows **Calendar out of date** and offers to re-add it; delete the old event yourself. Completing an action doesn't remove its event.
 - You can turn off the "offer after saving" prompt in Settings → Google Calendar, per device.
 
+## Push notifications (daily reminders and encouragement)
+
+Each device chooses its own reminders in **Settings → Notifications**:
+
+- **Morning plan:** today's time blocks, deadlines (with overdue count), an action to start with, the inbox count, and whether the weekly review is due.
+- **Evening shutdown:** how many actions you finished, a prompt to capture loose ends, what's on tomorrow, plus a quote. Tapping it opens the capture bar.
+- **Encouragement quotes:** at one or more times you pick, e.g. `09:00, 15:30`.
+
+The Now screen also shows a quote of the day. The 205 quotes are in `app/js/quotes.js`: Jordan Peterson, Lee Kuan Yew and Jim Kwik, plus the Stoics, Jocko Willink, David Goggins, Roosevelt, Churchill, David Allen, James Clear, Cal Newport, Drucker, Franklin, Frankl, Nietzsche, Dostoevsky, Solzhenitsyn and others. They were compiled from widely cited sources and checked against well-known misattributions, but not against primary sources. A few modern lines, Jim Kwik's especially, are commonly attributed paraphrases. Edit the file freely.
+
+**How it works:** web apps can't wake themselves on a timer, so a tiny **Cloudflare Worker** you own sends a push to each device at its chosen times. The push only says which reminder it is (morning, evening or quote), and it is encrypted. The device writes the text itself from its own copy of your data, so no task ever leaves your devices. The Worker stores only each device's push address, name, time zone and reminder times.
+
+### Deploy the push worker (one-time, ~10 minutes, free plan)
+
+1. In the Cloudflare dashboard, go to **Workers & Pages → Create → Create Worker** (Hello World), name it `clearhead-push`, then **Deploy**.
+2. Click **Edit code**, replace everything with the contents of [`worker/clearhead-push.js`](worker/clearhead-push.js), then **Deploy**.
+3. Go to **Storage & Databases → KV → Create** and make a namespace called `clearhead-push`.
+4. Open the worker's **Settings**:
+   - **Bindings → Add → KV namespace:** variable name `DEVICES`, then select the namespace.
+   - **Variables and Secrets → Add → Secret:** name `CLEARHEAD_KEY`, value any long random password.
+   - **Trigger events → Add → Cron trigger:** `* * * * *` (every minute).
+5. Check `https://clearhead-push.<your-subdomain>.workers.dev/api/health`. It should show `{"ok":true,"keySet":true}`.
+6. In Clearhead, go to **Settings → Notifications** and enter that worker address and the key. Pick your reminders, then **Turn on for this device**. Use **Test morning** or **Test quote** to check.
+7. On each other device, open **Settings → Notifications**. The address and key sync via Dropbox, so pick that device's reminders and turn it on.
+
+If you prefer the CLI, `worker/wrangler.toml` deploys the same worker with `npx wrangler deploy`. Its comments list the steps.
+
+**Good to know**
+
+- **Windows:** Chrome or Edge must be allowed to run in the background to receive pushes while closed. This is the default; check *Settings → System → Continue running background apps*.
+- **Android:** install the app to the home screen and allow notifications. Aggressive battery savers can delay delivery.
+- **Data freshness:** the morning and evening text uses what that device last knew. That's the last time Clearhead was open there and synced.
+- **Free tier:** a run every minute is 1,440 requests a day, within the free plan.
+- **Privacy:** the worker rejects any push address that isn't a real browser push service (Google, Microsoft, Mozilla, Apple). It needs the key for every change.
+
 ## Daily and weekly rhythm
 
 1. **All day:** capture anything the moment it appears. Don't organise it yet.
@@ -104,7 +139,7 @@ How sync works:
 
 ## Known limits
 
-- Reminders are in-app (banners and badges), not phone push notifications. Push would need a server, which a local-first design avoids. Put hard-time appointments in your calendar, as GTD recommends.
+- Push notifications need the small Cloudflare Worker described above; without it, reminders are in-app only (banners and badges). Put hard-time appointments in your calendar, as GTD recommends.
 - Dropbox apps start in "development" status, which is fine for personal use on your own account.
 
 ## Project layout
@@ -115,6 +150,10 @@ app/js/model.js                   GTD logic: capture parsing, Now ranking, revie
 app/js/sweep.js                   weekly-review mind sweep questions
 app/js/braindump.js               first brain dump cards and quick-sort choices
 app/js/calendar.js                Google Calendar links for deadlines and time blocks
+app/js/quotes.js                  205 encouragement quotes
+app/js/notify.js                  builds notification text on the device
+app/js/push.js                    push subscription and per-device reminder settings
+worker/clearhead-push.js          Cloudflare Worker that sends scheduled pushes (VAPID + RFC 8291)
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync
 app/js/app.js                     views, clarify wizard, weekly review, shortcuts
