@@ -119,6 +119,15 @@ export const store = {
     changed();
   },
 
+  // Miracle Morning: merge step results into that day's practice record.
+  updatePractice(day, patch) {
+    const prev = doc.practice[day];
+    const base = prev && !prev.deleted ? prev : { id: day, day, done: {}, createdAt: Date.now() };
+    doc.practice[day] = { ...base, ...patch, done: { ...base.done, ...(patch.done || {}) }, updatedAt: stamp(prev) };
+    changed();
+    return doc.practice[day];
+  },
+
   completeReview(day) {
     const r = { id: uid(), day, createdAt: Date.now(), updatedAt: Date.now() };
     doc.reviews[r.id] = r;

@@ -8,6 +8,7 @@ const DEFAULTS = {
   morning: { on: true, time: '07:30' },
   evening: { on: true, time: '18:00' },
   quotes: { on: true, times: ['12:30'] },
+  savers: { on: false, time: '06:00' },
 };
 
 export const SNAPSHOT_URL = '__snapshot.json';
@@ -39,13 +40,14 @@ export const push = {
   },
   get config() {
     const c = prefs.get('push.config', {});
-    return { ...DEFAULTS, ...c, morning: { ...DEFAULTS.morning, ...c.morning }, evening: { ...DEFAULTS.evening, ...c.evening }, quotes: { ...DEFAULTS.quotes, ...c.quotes } };
+    return { ...DEFAULTS, ...c, morning: { ...DEFAULTS.morning, ...c.morning }, evening: { ...DEFAULTS.evening, ...c.evening }, quotes: { ...DEFAULTS.quotes, ...c.quotes }, savers: { ...DEFAULTS.savers, ...c.savers } };
   },
   set config(c) { prefs.set('push.config', c); },
   get enabled() { return prefs.get('push.enabled', false); },
 
   schedule(c = this.config) {
     const s = [];
+    if (c.savers.on && TIME_RE.test(c.savers.time)) s.push({ kind: 'savers', time: c.savers.time });
     if (c.morning.on && TIME_RE.test(c.morning.time)) s.push({ kind: 'morning', time: c.morning.time });
     if (c.evening.on && TIME_RE.test(c.evening.time)) s.push({ kind: 'evening', time: c.evening.time });
     if (c.quotes.on) for (const time of c.quotes.times) s.push({ kind: 'quote', time });
@@ -65,7 +67,13 @@ export const push = {
       throw new Error('Could not reach the push server. Check the address and that you are online.');
     }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Push server error (${res.status})`);
+    if (!res.ok) {
+      // A worker deployed before Miracle Morning reminders existed rejects the new kind.
+      if (res.status === 400 && /reminder (time|type)/.test(data.error || '') && body?.schedule?.some((x) => x.kind === 'savers')) {
+        throw new Error('Your push worker is out of date. Re-paste worker/clearhead-push.js in Cloudflare (README → Push notifications), then try again.');
+      }
+      throw new Error(data.error || `Push server error (${res.status})`);
+    }
     return data;
   },
 

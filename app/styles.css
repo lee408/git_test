@@ -311,3 +311,39 @@ legend { font-size: 14px; color: var(--muted); padding: 0; }
 .daily-quote blockquote { margin: 0; font-style: italic; }
 .daily-quote figcaption { margin-top: 6px; color: var(--muted); font-size: 14px; }
 .daily-quote figcaption::before { content: "— "; }
+
+/* ---------- Miracle Morning (SAVERS) ---------- */
+.banner.savers { background: var(--warn-soft); }
+.sv-steps { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0 0 12px; }
+.sv-steps li { flex: 1; text-align: center; padding: 6px 0; border-radius: 8px; font-weight: 700; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+.sv-steps li.done { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.sv-steps li.current { border-color: var(--accent); color: var(--text); box-shadow: 0 0 0 2px var(--accent) inset; }
+.sv-steps li.off { opacity: 0.35; text-decoration: line-through; }
+.sv-time { font-size: 56px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; margin: 8px 0 4px; }
+.sv-time.up { color: var(--accent); }
+.sv-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin: 16px 0 4px; }
+.sv-controls .btn { min-height: 52px; }
+.breath { display: grid; place-items: center; padding: 18px 0 4px; }
+.breath-circle { width: 150px; height: 150px; border-radius: 50%; background: radial-gradient(circle, var(--accent-soft), var(--accent)); transform: scale(0.6); transition: transform 0.3s linear; opacity: 0.85; }
+.breath-label { margin: 14px 0 0; font-size: 18px; font-weight: 600; color: var(--accent); }
+.savers-text { white-space: pre-wrap; font-size: 18px; line-height: 1.6; padding: 14px 16px; margin: 12px 0; border-radius: 10px; background: var(--surface-2); }
+.sv-exercises { padding-left: 22px; margin: 12px 0; }
+.sv-exercises li { padding: 6px 8px; border-radius: 8px; }
+.sv-exercises li.current { background: var(--accent-soft); font-weight: 700; }
+.sv-insight { margin: 18px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.sv-grid { display: grid; grid-template-columns: repeat(15, 1fr); gap: 4px; margin: 0 0 16px; max-width: 420px; }
+.sv-day { aspect-ratio: 1; border-radius: 4px; background: var(--surface-2); }
+.sv-day.s1, .sv-day.s2 { background: color-mix(in srgb, var(--accent) 25%, var(--surface-2)); }
+.sv-day.s3, .sv-day.s4 { background: color-mix(in srgb, var(--accent) 55%, var(--surface-2)); }
+.sv-day.s5, .sv-day.s6 { background: color-mix(in srgb, var(--accent) 80%, var(--surface-2)); }
+.sv-day.fin { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sv-letters { display: flex; justify-content: center; gap: 8px; font-size: 22px; font-weight: 700; color: var(--line); }
+.sv-letters .on { color: var(--accent); }
+.done-card .sv-grid { margin: 12px auto 16px; }
+.sv-mins { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 0 10px; }
+@media (max-width: 599px) {
+  .sv-time { font-size: 44px; margin: 4px 0; }
+  .breath { padding: 8px 0 0; }
+  .breath-circle { width: 110px; height: 110px; }
+  .breath-label { margin-top: 8px; }
+}

@@ -1,14 +1,14 @@
 // Clearhead push server: a Cloudflare Worker that sends scheduled Web Push reminders.
 //
 // It stores only, per device: the browser's push subscription, a device name, its time zone and
-// its reminder times. Each push carries just {kind} (morning/evening/quote), encrypted per
-// RFC 8291; the device builds the notification text from its own data.
+// its reminder times. Each push carries just {kind}, encrypted per
+// RFC 8291 (morning/evening/quote/savers); the device builds the notification text from its own data.
 //
 // Setup (see README "Push notifications"): bind a KV namespace as DEVICES, set a secret
 // CLEARHEAD_KEY, add a cron trigger "* * * * *". VAPID keys are generated on first use.
 // Single file with no dependencies, so it can be pasted into the Cloudflare dashboard editor.
 
-const KINDS = ['morning', 'evening', 'quote'];
+const KINDS = ['morning', 'evening', 'quote', 'savers'];
 // Only ever POST to real browser push services.
 const PUSH_HOSTS = ['fcm.googleapis.com', 'notify.windows.com', 'push.services.mozilla.com', 'push.apple.com'];
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -102,7 +102,8 @@ export function validateDevice(body) {
   const schedule = Array.isArray(body.schedule) ? body.schedule : [];
   if (schedule.length > 12) throw new HttpError(400, 'Too many reminders');
   for (const s of schedule) {
-    if (!KINDS.includes(s?.kind) || !TIME_RE.test(s?.time)) throw new HttpError(400, 'Invalid reminder time');
+    if (!KINDS.includes(s?.kind)) throw new HttpError(400, `Unknown reminder type "${s?.kind}": update the worker code`);
+    if (!TIME_RE.test(s?.time)) throw new HttpError(400, 'Invalid reminder time');
   }
   return {
     subscription: { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth } },

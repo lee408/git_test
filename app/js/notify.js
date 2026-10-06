@@ -3,8 +3,9 @@
 // Pure logic, unit-tested in tests/notify.test.mjs.
 import { isoDay, addDays, live, openItems, inboxItems, suggestNow, reviewStatus } from './model.js';
 import { randomQuote, formatQuote } from './quotes.js';
+import { STEPS, saversSettings, durations, saversStreak, dayRecord } from './savers.js';
 
-export const NOTIFY_KINDS = ['morning', 'evening', 'quote'];
+export const NOTIFY_KINDS = ['morning', 'evening', 'quote', 'savers'];
 const ACTIVE = (i) => !['someday', 'reference'].includes(i.list);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
@@ -22,6 +23,17 @@ export function buildNotification(kind, doc, now = new Date(), { quote = randomQ
   const today = isoDay(now);
   if (kind === 'quote' || !doc) {
     return { title: 'A thought for today', body: formatQuote(quote), tag: `clearhead-${kind}`, url: './' };
+  }
+
+  if (kind === 'savers') {
+    const cfg = saversSettings(doc.settings);
+    const mins = durations(cfg).reduce((a, b) => a + b, 0);
+    const streak = saversStreak(doc, today);
+    const doneToday = dayRecord(doc, today)?.finished;
+    const body = doneToday
+      ? `Done today. ${streak}-day streak. See you tomorrow.`
+      : `${STEPS.map((s) => s.name).join(' · ')}\n${mins} min${streak ? ` · keep your ${streak}-day streak going` : '. Start your streak today'}. Tap to begin.`;
+    return { title: 'Your Miracle Morning', body, tag: 'clearhead-savers', url: './?savers=1' };
   }
 
   if (kind === 'morning') {

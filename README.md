@@ -45,6 +45,27 @@ After you save a dated action, Clearhead offers **Add**. The editor and the Upco
 - **It's one-way and manual:** changing a date later doesn't move the calendar event. The action shows **Calendar out of date** and offers to re-add it; delete the old event yourself. Completing an action doesn't remove its event.
 - You can turn off the "offer after saving" prompt in Settings → Google Calendar, per device.
 
+## Miracle Morning (SAVERS)
+
+A guided morning practice based on Hal Elrod's *Miracle Morning*, under **More → Settings → Miracle Morning**. You can start it from the Now prompt, from that settings card, or by tapping its notification.
+
+- **Six timed steps:** Silence, Affirmations, Visualization, Exercise, Reading, Scribing.
+- **Length:** *Express* (6 min, 1 each), *Standard* (30 min, 5 each), *Full hour* (10/5/5/10/20/10), or *My routine* with your own minutes per step. Steps set to 0 are skipped.
+- **Each step:**
+  - A countdown with a soft chime and vibration at the end. The screen stays awake.
+  - Pause, +1 min, Done, Skip and Back. Optionally it moves to the next step automatically.
+- **Silence:** an animated box-breathing guide (in 4, hold 4, out 4, hold 4). You can turn it off for a plain silent timer.
+- **Affirmations and Visualization:** show the text you wrote, so you can read it aloud or picture it. Visualization also lists today's top three actions from Clearhead, so you can rehearse doing them.
+- **Exercise:** walks through your routine one move at a time. The default is a 6-move bodyweight sequence; edit it one per line.
+- **Scribing:** shows journal prompts: gratitude, wins, and what would make today great.
+- **Ideas mid-session:** a "→ Inbox" box parks them as inbox items, so they don't break your focus.
+- **Tracking:** each day's steps and your streak are recorded and synced. The streak counts days you finished the session. There's a 30-day grid.
+- **Reminders:**
+  - The Now screen shows a Start prompt (with a 6-minute option) until you've done it, or until you tap *Not today*.
+  - In **Settings → Notifications**, turn on **Miracle Morning (SAVERS)** at your chosen time on each device. Tapping the notification opens the session.
+
+> **If you deployed the push worker before this feature,** re-paste [`worker/clearhead-push.js`](worker/clearhead-push.js) into the Cloudflare editor and deploy. Your KV data and keys stay as they are. An old worker rejects the Miracle Morning reminder, and the app tells you so.
+
 ## Push notifications (daily reminders and encouragement)
 
 Each device chooses its own reminders in **Settings → Notifications**:
@@ -52,6 +73,7 @@ Each device chooses its own reminders in **Settings → Notifications**:
 - **Morning plan:** today's time blocks, deadlines (with overdue count), an action to start with, the inbox count, and whether the weekly review is due.
 - **Evening shutdown:** how many actions you finished, a prompt to capture loose ends, what's on tomorrow, plus a quote. Tapping it opens the capture bar.
 - **Encouragement quotes:** at one or more times you pick, e.g. `09:00, 15:30`.
+- **Miracle Morning:** a nudge to start your SAVERS practice, with your streak (see above).
 
 The Now screen also shows a quote of the day. The 205 quotes are in `app/js/quotes.js`: Jordan Peterson, Lee Kuan Yew and Jim Kwik, plus the Stoics, Jocko Willink, David Goggins, Roosevelt, Churchill, David Allen, James Clear, Cal Newport, Drucker, Franklin, Frankl, Nietzsche, Dostoevsky, Solzhenitsyn and others. They were compiled from widely cited sources and checked against well-known misattributions, but not against primary sources. A few modern lines, Jim Kwik's especially, are commonly attributed paraphrases. Edit the file freely.
 
@@ -153,6 +175,7 @@ app/js/calendar.js                Google Calendar links for deadlines and time b
 app/js/quotes.js                  205 encouragement quotes
 app/js/notify.js                  builds notification text on the device
 app/js/push.js                    push subscription and per-device reminder settings
+app/js/savers.js                  Miracle Morning steps, presets, breathing and streaks
 worker/clearhead-push.js          Cloudflare Worker that sends scheduled pushes (VAPID + RFC 8291)
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync

@@ -4,6 +4,7 @@ export const LISTS = ['inbox', 'next', 'waiting', 'someday', 'reference'];
 export const DEFAULT_CONTEXTS = ['home', 'office', 'errands', 'computer', 'phone', 'deep', 'admin'];
 export const ENERGY = ['low', 'med', 'high'];
 const TOMBSTONE_TTL_DAYS = 180;
+const COLLECTIONS = ['items', 'projects', 'reviews', 'practice'];
 
 export function uid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -16,6 +17,7 @@ export function emptyDoc() {
     items: {},
     projects: {},
     reviews: {},
+    practice: {}, // Miracle Morning (SAVERS) days, keyed by YYYY-MM-DD
     settings: { contexts: [...DEFAULT_CONTEXTS], reviewDay: 1, updatedAt: 0 },
   };
 }
@@ -279,13 +281,14 @@ export function merge(a, b) {
     items: mergeColl(a.items, b.items),
     projects: mergeColl(a.projects, b.projects),
     reviews: mergeColl(a.reviews, b.reviews),
+    practice: mergeColl(a.practice, b.practice),
     settings: newer(a.settings, b.settings),
   };
 }
 
 export function sameDoc(a, b) {
   if (!a || !b) return false;
-  for (const k of ['items', 'projects', 'reviews']) {
+  for (const k of COLLECTIONS) {
     const ka = Object.keys(a[k] || {});
     if (ka.length !== Object.keys(b[k] || {}).length) return false;
     for (const id of ka) {
@@ -297,7 +300,7 @@ export function sameDoc(a, b) {
 
 export function purgeTombstones(doc, nowMs = Date.now()) {
   const cutoff = nowMs - TOMBSTONE_TTL_DAYS * 86400000;
-  for (const k of ['items', 'projects', 'reviews']) {
+  for (const k of COLLECTIONS) {
     for (const [id, r] of Object.entries(doc[k])) if (r.deleted && r.updatedAt < cutoff) delete doc[k][id];
   }
   return doc;
@@ -311,6 +314,7 @@ export function normalizeDoc(raw) {
     items: raw.items || {},
     projects: raw.projects || {},
     reviews: raw.reviews || {},
+    practice: raw.practice || {},
     settings: { ...base.settings, ...(raw.settings || {}) },
   };
 }

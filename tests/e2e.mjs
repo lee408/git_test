@@ -300,6 +300,69 @@ await phone.waitForTimeout(300);
 await phone.click('.tabbar [data-view="inbox"]');
 assert.match(await phone.textContent('#main'), /Article/);
 
+// ---------- Miracle Morning: guided SAVERS with a fake clock ----------
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+  await ctx.clock.install({ time: new Date(2026, 9, 6, 6, 0) });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => errors.push(`savers: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`savers: ${m.text()}`); });
+  await page.goto(BASE);
+  await page.click('[data-action="dump-dismiss"]');
+  assert.match(await page.textContent('.banner.savers'), /Miracle Morning: 30 min of SAVERS/);
+
+  // Routine: Silence 1, Affirmations 1, Visualization 0 (skipped), Exercise 1, Reading 0, Scribing 1.
+  await page.click('.tabbar [data-view="more"]');
+  await page.click('#main [data-view="settings"]');
+  await page.selectOption('#savers-settings [name="preset"]', 'custom');
+  for (const [id, m] of Object.entries({ silence: 1, affirmations: 1, visualization: 0, exercise: 1, reading: 0, scribing: 1 })) {
+    await page.fill(`#savers-settings [name="min-${id}"]`, String(m));
+  }
+  await page.fill('#savers-settings [name="affirmations"]', 'I am calm, focused and disciplined.');
+  await page.click('#savers-settings .btn.primary');
+
+  await page.click('.tabbar [data-view="now"]');
+  await page.click('.banner.savers [data-view="savers"]');
+  assert.match(await page.textContent('#main'), /How long today\?/);
+  await page.click('[data-action="savers-start"][data-preset="custom"]');
+  assert.match(await page.textContent('#main .q'), /Silence/);
+  assert.equal(await page.textContent('#sv-time'), '01:00');
+  await page.clock.runFor(5000);
+  assert.equal(await page.textContent('#sv-time'), '00:55');
+  assert.match(await page.textContent('#sv-breath'), /^Hold · 3$/);
+  await page.click('[data-action="savers-toggle"]'); // pause
+  await page.clock.runFor(10000);
+  assert.equal(await page.textContent('#sv-time'), '00:55', 'paused');
+  assert.equal(await page.textContent('#sv-breath'), 'Paused');
+  await page.click('[data-action="savers-toggle"]'); // resume
+  await shot(page, '10-savers-silence');
+  await page.clock.runFor(56000);
+  assert.match(await page.textContent('[data-action="savers-next"]'), /Next: Affirmations/);
+  await page.click('[data-action="savers-next"]');
+  assert.match(await page.textContent('.savers-text'), /I am calm, focused and disciplined\./);
+  await page.fill('.sv-insight input', 'Call the bank about the mortgage');
+  await page.press('.sv-insight input', 'Enter');
+  await page.click('[data-action="savers-done"]');
+  assert.match(await page.textContent('#main .q'), /Exercise/, 'Visualization (0 min) skipped');
+  assert.equal(await page.locator('#sv-exercises li').count(), 6);
+  assert.equal(await page.locator('#sv-exercises li.current').textContent(), 'Jumping jacks');
+  await page.clock.runFor(31000);
+  assert.equal(await page.locator('#sv-exercises li.current').textContent(), 'Lunges', '31s of 60s with 6 moves = 4th');
+  await shot(page, '11-savers-exercise');
+  await page.click('[data-action="savers-skip"]');
+  assert.match(await page.textContent('#main .q'), /Scribing/, 'Reading (0 min) skipped');
+  await page.click('[data-action="savers-done"]');
+  assert.match(await page.textContent('#main'), /3 of 6 SAVERS done/);
+  assert.match(await page.textContent('#main'), /Inbox \(1 new\)/);
+  await shot(page, '12-savers-done');
+  const rec = await page.evaluate(() => JSON.parse(localStorage.getItem('clearhead.doc.v1')).practice['2026-10-06']);
+  assert.equal(rec.finished, true);
+  assert.deepEqual(Object.keys(rec.done).sort(), ['affirmations', 'scribing', 'silence']);
+  await page.click('[data-action="savers-close"][data-to="now"]');
+  assert.equal(await page.locator('.banner.savers').count(), 0, 'prompt gone once done today');
+  await ctx.close();
+}
+
 // ---------- Push notifications: real service worker, mocked push server ----------
 {
   const { generateKeyPairSync } = await import('node:crypto');
@@ -339,17 +402,19 @@ assert.match(await phone.textContent('#main'), /Article/);
   await page.fill('#push-settings [name="key"]', 'my-secret');
   await page.fill('#push-settings [name="name"]', 'Pixel');
   await page.fill('#push-settings [name="morningTime"]', '07:15');
+  await page.check('#push-settings [name="saversOn"]');
+  await page.fill('#push-settings [name="saversTime"]', '06:10');
   await page.uncheck('#push-settings [name="eveningOn"]');
   await page.fill('#push-settings [name="quoteTimes"]', '9:00, 15:30, nonsense');
   await page.click('#push-settings .btn.primary');
   await page.waitForFunction(() => /On for this device/.test(document.querySelector('.push-status')?.textContent));
-  assert.match(await page.textContent('.push-status'), /Morning plan 07:15 · Quote 09:00 · Quote 15:30/);
+  assert.match(await page.textContent('.push-status'), /Miracle Morning 06:10 · Morning plan 07:15 · Quote 09:00 · Quote 15:30/);
   const put = reqs.find((r) => r.method === 'PUT');
   assert.match(put.path, /^\/api\/devices\/dev-/);
   assert.equal(put.auth, 'Bearer my-secret');
   assert.equal(put.body.name, 'Pixel');
   assert.ok(put.body.tz);
-  assert.deepEqual(put.body.schedule, [{ kind: 'morning', time: '07:15' }, { kind: 'quote', time: '09:00' }, { kind: 'quote', time: '15:30' }]);
+  assert.deepEqual(put.body.schedule, [{ kind: 'savers', time: '06:10' }, { kind: 'morning', time: '07:15' }, { kind: 'quote', time: '09:00' }, { kind: 'quote', time: '15:30' }]);
   assert.equal(put.body.subscription.endpoint, 'https://fcm.googleapis.com/fcm/send/e2e');
   assert.equal(await page.evaluate(() => window.__subscribeOpts.applicationServerKey.byteLength), 65);
   await page.click('[data-action="push-test"][data-kind="quote"]');
@@ -387,6 +452,10 @@ assert.match(await phone.textContent('#main'), /Article/);
   assert.equal(evening.title, 'Shutdown time');
   assert.equal(new URL(evening.url, BASE).search, '?capture=1');
 
+  await cdp.send('ServiceWorker.deliverPushMessage', { origin, registrationId, data: JSON.stringify({ kind: 'savers' }) });
+  const [mm] = await shown('clearhead-savers');
+  assert.equal(mm.title, 'Your Miracle Morning');
+  assert.equal(new URL(mm.url, BASE).search, '?savers=1');
   await page.click('[data-action="push-disable"]');
   await page.waitForFunction(() => /Off for this device/.test(document.querySelector('.push-status')?.textContent));
   assert.equal(reqs.at(-1).method, 'DELETE');

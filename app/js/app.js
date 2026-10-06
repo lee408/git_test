@@ -8,6 +8,10 @@ import { buildSweep, splitLines } from './sweep.js';
 import { buildBrainDump, TRIAGE, triagePatch } from './braindump.js';
 import { push, saveSnapshot, parseTimes } from './push.js';
 import { quoteOfDay } from './quotes.js';
+import {
+  STEPS, PRESETS, SCRIBING_PROMPTS, saversSettings, durations, exerciseList, exerciseAt, breathPhase,
+  saversStreak, lastDays, dayRecord, stepsDone, totalSessions,
+} from './savers.js';
 import { gcalUrl, calKey, calendarKinds, calendarState, blockLength, blockEnd } from './calendar.js';
 
 // ---------- helpers ----------
@@ -74,8 +78,9 @@ const state = {
   process: null,
   editingId: null,
   pushMsg: '',
+  savers: null, // running Miracle Morning session
 };
-if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage'].includes(state.view)) state.view = 'now';
+if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage', 'savers'].includes(state.view)) state.view = 'now';
 
 function go(view, extra = {}) {
   Object.assign(state, { view, ...extra });
@@ -137,6 +142,11 @@ function header(title, sub = '', actions = '') {
   return `<header class="view-head"><div><h1>${title}</h1>${sub ? `<p class="sub">${sub}</p>` : ''}</div>${actions}</header>`;
 }
 
+function saversPromptDue() {
+  const t = today();
+  return saversSettings(doc().settings).nowPrompt && !dayRecord(doc(), t)?.finished && prefs.get('saversLater', null) !== t;
+}
+
 function banners() {
   const out = [];
   const d = doc();
@@ -150,7 +160,14 @@ function banners() {
       <li><strong>Quick sort</strong> everything with one tap each, then clarify the real actions</li></ol>
       <div class="row"><button class="btn primary" data-action="dump-start">Start brain dump</button>
       <button class="link" data-action="dump-dismiss">Skip, I'll add things as I go</button></div></div>`);
-  } else if (dump.started && !dump.finished) {
+  } else if (saversPromptDue()) {
+    const cfg = saversSettings(d.settings);
+    const streak = saversStreak(d, today());
+    out.push(`<div class="banner savers"><span><strong>Miracle Morning</strong>: ${durations(cfg).reduce((a, b) => a + b, 0)} min of SAVERS${streak ? ` · ${streak}-day streak` : ''}.</span>
+      <span class="row"><button class="btn primary" data-action="nav" data-view="savers">Start</button><button class="btn" data-action="savers-start" data-preset="express">6-min</button>
+      <button class="link" data-action="savers-later">Not today</button></span></div>`);
+  }
+  if (dump.started && !dump.finished) {
     out.push(`<div class="banner"><span><strong>Brain dump in progress</strong>: ${plural(dump.captured, 'thing')} captured so far.</span>
       <button class="btn primary" data-action="dump-start">Resume</button></div>`);
   }
@@ -564,6 +581,217 @@ function undoTriage() {
   lastTriage = null;
 }
 
+// ---------- Miracle Morning: guided SAVERS session ----------
+// Session state lives in memory; finished steps are saved (and synced) per day as they happen.
+let saversTimer = null;
+let wakeLock = null;
+let audio = null;
+
+const fmtClock = (ms) => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+};
+
+function chime() {
+  try {
+    if (audio) {
+      const t = audio.currentTime;
+      for (const [freq, at] of [[660, 0], [880, 0.35]]) {
+        const osc = audio.createOscillator();
+        const gain = audio.createGain();
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, t + at);
+        gain.gain.exponentialRampToValueAtTime(0.25, t + at + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + at + 1.2);
+        osc.connect(gain).connect(audio.destination);
+        osc.start(t + at);
+        osc.stop(t + at + 1.3);
+      }
+    }
+  } catch { /* audio unavailable */ }
+  navigator.vibrate?.([200, 100, 200]);
+}
+
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch { /* not supported or denied */ }
+}
+
+const svLeft = (sv) => (sv.running ? sv.endAt - Date.now() : sv.left);
+
+function saversBegin(preset) {
+  const cfg = saversSettings(doc().settings);
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume?.(); } catch { audio = null; }
+  const mins = durations(cfg, preset);
+  state.savers = { preset, mins, i: -1, running: false, left: 0, endAt: 0, timeUp: false, captured: 0, day: today() };
+  saversGoto(0);
+  go('savers');
+}
+
+// Moves to step i (skipping 0-minute steps) and starts its timer; past the end finishes.
+function saversGoto(i, { run = true } = {}) {
+  const sv = state.savers;
+  while (i < STEPS.length && sv.mins[i] === 0) i++;
+  if (i >= STEPS.length) return saversFinish();
+  sv.i = i;
+  sv.timeUp = false;
+  sv.left = sv.mins[i] * 60000;
+  sv.running = run;
+  sv.endAt = Date.now() + sv.left;
+  sv.stepStart = Date.now();
+  sv.pausedFor = 0;
+  render();
+}
+
+function saversMark(stepId) {
+  store.updatePractice(state.savers.day, { done: { [stepId]: true }, preset: state.savers.preset });
+}
+
+function saversFinish() {
+  const sv = state.savers;
+  sv.finished = true;
+  sv.running = false;
+  store.updatePractice(sv.day, { finished: true, preset: sv.preset, minutes: sv.mins.reduce((a, b) => a + b, 0) });
+  chime();
+  keepAwake(false);
+  render();
+}
+
+// Runs 4×/second while a session is on screen: updates the clock, breathing guide and exercise.
+function saversTick() {
+  const sv = state.savers;
+  if (!sv || sv.finished || state.view !== 'savers') return;
+  const left = svLeft(sv);
+  const total = sv.mins[sv.i] * 60000;
+  const elapsed = Math.max(0, total - left);
+  const clock = $('#sv-time');
+  if (clock) clock.textContent = fmtClock(left);
+  const bar = $('#sv-progress');
+  if (bar) bar.value = elapsed / 1000;
+  const step = STEPS[sv.i];
+  if (step.id === 'silence') {
+    const b = breathPhase(elapsed / 1000);
+    const label = $('#sv-breath');
+    if (label) label.textContent = sv.running ? `${b.label} · ${b.count}` : 'Paused';
+    const circle = $('.breath-circle');
+    if (circle && sv.running) {
+      const t = (elapsed / 1000) % 16;
+      const scale = t < 4 ? 0.6 + 0.4 * (t / 4) : t < 8 ? 1 : t < 12 ? 1 - 0.4 * ((t - 8) / 4) : 0.6;
+      circle.style.transform = `scale(${scale.toFixed(3)})`;
+    }
+  }
+  if (step.id === 'exercise') {
+    const list = $$('#sv-exercises li');
+    const cur = exerciseAt(list, elapsed, total);
+    list.forEach((li, k) => li.classList.toggle('current', k === cur));
+  }
+  if (sv.running && left <= 0) {
+    sv.running = false;
+    sv.left = 0;
+    sv.timeUp = true;
+    chime();
+    saversMark(step.id);
+    if (saversSettings(doc().settings).autoAdvance) saversGoto(sv.i + 1);
+    else render();
+  }
+}
+
+function saversLoop(on) {
+  if (on && !saversTimer) saversTimer = setInterval(saversTick, 250);
+  if (!on && saversTimer) { clearInterval(saversTimer); saversTimer = null; }
+}
+
+function streakGrid(days) {
+  return `<div class="sv-grid" aria-label="Last ${days.length} days">${days.map((d) => `<span class="sv-day s${d.steps}${d.finished ? ' fin' : ''}" title="${esc(d.day)}: ${d.steps}/6"></span>`).join('')}</div>`;
+}
+
+function saversStepPanel(step, cfg, sv) {
+  const total = sv.mins[sv.i] * 60;
+  if (step.id === 'silence') {
+    return cfg.breathing
+      ? '<div class="breath"><div class="breath-circle"></div><p id="sv-breath" class="breath-label">Breathe in · 4</p></div>'
+      : '<p class="hint">Just sit. Notice your breath. When thoughts come, let them pass and return to the breath.</p>';
+  }
+  if (step.id === 'affirmations' || step.id === 'visualization') {
+    const key = step.id === 'affirmations' ? 'affirmations' : 'vision';
+    const text = cfg[key];
+    const extra = step.id === 'visualization'
+      ? (() => {
+        const top = suggestNow(doc(), today()).slice(0, 3);
+        return top.length ? `<p class="hint">Then rehearse today. See yourself doing these well:</p><ul class="plain">${top.map((i) => `<li>${esc(i.title)}</li>`).join('')}</ul>` : '';
+      })()
+      : '';
+    return text
+      ? `<div class="savers-text">${esc(text)}</div>${extra}`
+      : `<form data-form="savers-text" data-key="${key}"><label>${key === 'vision' ? 'Write what you want to see: your goals achieved, how it feels, who you are' : 'Write your affirmations: what you want, why it matters, who you\'re committed to being, what you\'ll do'}
+          <textarea name="text" rows="5"></textarea></label><button class="btn">Save (you can edit it in Settings)</button></form>${extra}`;
+  }
+  if (step.id === 'exercise') {
+    const list = exerciseList(cfg);
+    return `<ol id="sv-exercises" class="sv-exercises">${list.map((e) => `<li>${esc(e)}</li>`).join('')}</ol>
+      <p class="hint">About ${Math.max(1, Math.round(total / list.length))} seconds each. Go at your own pace.</p>`;
+  }
+  if (step.id === 'scribing') {
+    return `<ul class="plain">${SCRIBING_PROMPTS.map((p) => `<li>${esc(p)}</li>`).join('')}</ul><p class="hint">Use a paper notebook or your journal app.</p>`;
+  }
+  return '';
+}
+
+views.savers = () => {
+  const cfg = saversSettings(doc().settings);
+  const t = today();
+  const sv = state.savers;
+  const streak = saversStreak(doc(), t);
+  if (!sv) {
+    const opt = (p, label) => `<button class="btn ${p === cfg.preset ? 'primary' : ''}" data-action="savers-start" data-preset="${p}">${label}<small>${durations(cfg, p).reduce((a, b) => a + b, 0)} min</small></button>`;
+    return `${header('Miracle Morning', 'The Life SAVERS: Silence, Affirmations, Visualization, Exercise, Reading, Scribing. Start your day by investing in yourself.')}
+      <div class="review-stats"><span class="stat"><strong>${streak}</strong> day streak</span><span class="stat"><strong>${totalSessions(doc())}</strong> sessions</span></div>
+      ${streakGrid(lastDays(doc(), t, 30))}
+      <div class="wizard"><h2 class="q">How long today?</h2>
+        <div class="choices">${opt('express', 'Express')}${opt('half', 'Standard')}${opt('full', 'Full hour')}${opt('custom', 'My routine')}</div>
+        <p class="hint">Durations, affirmations, vision and exercise routine are in Settings → Miracle Morning.</p></div>`;
+  }
+  if (sv.finished) {
+    const rec = dayRecord(doc(), sv.day);
+    return `${header('Miracle Morning complete')}
+      <div class="wizard done-card"><p class="big-emoji">✓</p>
+        <p><strong>${stepsDone(rec)} of 6 SAVERS done.</strong> ${streak > 1 ? `That's ${streak} days in a row.` : 'Day one of your streak.'}</p>
+        <p class="sv-letters">${STEPS.map((s) => `<span class="${rec?.done?.[s.id] ? 'on' : ''}" title="${s.name}">${s.letter}</span>`).join('')}</p>
+        ${streakGrid(lastDays(doc(), t, 30))}
+        <div class="row center"><button class="btn primary" data-action="savers-close" data-to="now">Plan my day</button>
+        ${sv.captured ? `<button class="btn" data-action="savers-close" data-to="inbox">Inbox (${sv.captured} new)</button>` : ''}</div></div>`;
+  }
+  const step = STEPS[sv.i];
+  const rec = dayRecord(doc(), sv.day);
+  const nextIdx = sv.mins.findIndex((m, k) => k > sv.i && m > 0);
+  return `${header('Miracle Morning', `${PRESETS[sv.preset]?.label || 'My routine'} · step ${sv.i + 1} of 6`)}
+    <ol class="sv-steps">${STEPS.map((s, k) => `<li class="${k === sv.i ? 'current' : ''} ${rec?.done?.[s.id] ? 'done' : ''} ${sv.mins[k] === 0 ? 'off' : ''}" title="${s.name}">${s.letter}</li>`).join('')}</ol>
+    <div class="wizard savers-card">
+      <h2 class="q">${step.name}</h2>
+      <p class="hint">${esc(step.intro)}</p>
+      <div id="sv-time" class="sv-time ${sv.timeUp ? 'up' : ''}" aria-live="off">${fmtClock(svLeft(sv))}</div>
+      <progress id="sv-progress" class="sweep-progress" max="${sv.mins[sv.i] * 60}" value="0" aria-label="Step progress"></progress>
+      ${saversStepPanel(step, cfg, sv)}
+      <div class="sv-controls">
+        ${sv.timeUp
+    ? `<button class="btn primary" data-action="savers-next">${nextIdx >= 0 ? `Next: ${STEPS[nextIdx].name} →` : 'Finish'}</button>`
+    : `<button class="btn" data-action="savers-toggle">${sv.running ? 'Pause' : 'Resume'}</button>
+        <button class="btn" data-action="savers-more">+1 min</button>
+        <button class="btn primary" data-action="savers-done">Done ✓</button>`}
+      </div>
+      <div class="wizard-nav">${sv.i > 0 ? '<button class="link" data-action="savers-back">← Back</button>' : '<span></span>'}
+        <span><button class="link" data-action="savers-skip">Skip step</button> · <button class="link" data-action="savers-quit">Stop</button></span></div>
+      <form class="inline-add sv-insight" data-form="savers-insight"><input name="title" placeholder="Idea popped up? Park it in your inbox" aria-label="Send an idea to the inbox"><button class="btn">→ Inbox</button></form>
+    </div>`;
+};
+
 views.done = () => {
   const items = live(doc().items).filter((i) => i.done && i.completedAt > Date.now() - 30 * 86400000)
     .sort((a, b) => b.completedAt - a.completedAt);
@@ -618,6 +846,7 @@ views.settings = () => {
       <div class="row"><button class="btn primary" data-action="dump-start">${dmp.started && !dmp.finished ? 'Resume brain dump' : 'Start brain dump'}</button>
       <button class="btn" data-action="nav" data-view="triage">Quick sort inbox</button></div>`; })()}
     </section>
+    ${saversCard()}
     ${pushCard()}
     <section class="card"><h2>Google Calendar</h2>
       <p class="hint">Actions with a deadline or a time block get an "Add to Google Calendar" button (in the editor and in Upcoming). It opens Google Calendar with the event filled in. Nothing is sent until you press Save there, and no sign-in to Clearhead is needed.</p>
@@ -641,8 +870,28 @@ views.settings = () => {
     </section>`;
 };
 
+function saversCard() {
+  const cfg = saversSettings(doc().settings);
+  const custom = durations(cfg, 'custom');
+  return `<section class="card" id="savers-settings"><h2>Miracle Morning (SAVERS)</h2>
+    <p class="hint">Streak: <strong>${saversStreak(doc(), today())} days</strong> · ${totalSessions(doc())} sessions. <button class="link" data-action="nav" data-view="savers">Start a session</button></p>
+    <form data-form="savers-settings">
+      <label>Default length<select name="preset">${[...Object.entries(PRESETS).map(([k, p]) => [k, p.label]), ['custom', 'My routine (below)']]
+    .map(([k, l]) => `<option value="${k}" ${cfg.preset === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <fieldset><legend>My routine (minutes)</legend><div class="sv-mins">${STEPS.map((s, k) => `<label>${s.name}<input type="number" min="0" max="60" name="min-${s.id}" value="${custom[k]}"></label>`).join('')}</div></fieldset>
+      <label>Affirmations (shown during A)<textarea name="affirmations" rows="5" placeholder="I am committed to… because… I will…">${esc(cfg.affirmations)}</textarea></label>
+      <label>Vision (shown during V)<textarea name="vision" rows="4" placeholder="What I see when my goals are achieved…">${esc(cfg.vision)}</textarea></label>
+      <label>Exercise routine (one per line)<textarea name="exercises" rows="5">${esc(cfg.exercises)}</textarea></label>
+      <label class="review-check"><input type="checkbox" name="breathing" ${cfg.breathing ? 'checked' : ''}><span>Breathing guide during Silence</span></label>
+      <label class="review-check"><input type="checkbox" name="autoAdvance" ${cfg.autoAdvance ? 'checked' : ''}><span>Move to the next step automatically</span></label>
+      <label class="review-check"><input type="checkbox" name="nowPrompt" ${cfg.nowPrompt ? 'checked' : ''}><span>Show a Start prompt on Now until done</span></label>
+      <button class="btn primary">Save</button>
+    </form>
+  </section>`;
+}
+
 function pushSummary(c = push.config) {
-  const label = { morning: 'Morning plan', evening: 'Evening shutdown', quote: 'Quote' };
+  const label = { morning: 'Morning plan', evening: 'Evening shutdown', quote: 'Quote', savers: 'Miracle Morning' };
   const s = push.schedule(c);
   return s.length ? s.map((x) => `${label[x.kind]} ${x.time}`).join(' · ') : 'no reminders selected';
 }
@@ -662,6 +911,8 @@ function pushCard() {
       <div class="grid2"><label>Push server<input name="server" value="${esc(push.server)}" placeholder="https://clearhead-push.you.workers.dev" inputmode="url" spellcheck="false"></label>
       <label>Access key<input name="key" type="password" value="${esc(push.key)}"></label></div>
       <label>This device's name<input name="name" value="${esc(c.name)}" placeholder="e.g. Pixel, Work PC"></label>
+      <div class="push-row"><label class="review-check"><input type="checkbox" name="saversOn" ${c.savers.on ? 'checked' : ''}><span>Miracle Morning (SAVERS)</span></label>
+        <input type="time" name="saversTime" value="${esc(c.savers.time)}" aria-label="Miracle Morning time"></div>
       <div class="push-row"><label class="review-check"><input type="checkbox" name="morningOn" ${c.morning.on ? 'checked' : ''}><span>Morning plan</span></label>
         <input type="time" name="morningTime" value="${esc(c.morning.time)}" aria-label="Morning plan time"></div>
       <div class="push-row"><label class="review-check"><input type="checkbox" name="eveningOn" ${c.evening.on ? 'checked' : ''}><span>Evening shutdown</span></label>
@@ -937,7 +1188,7 @@ function render() {
     waiting: openItems(d).filter((i) => i.list === 'waiting').length,
     review: reviewStatus(d, t).due ? '!' : '',
   };
-  const navView = { project: 'projects', sweep: 'review', dump: 'now', triage: 'inbox' }[state.view] || state.view;
+  const navView = { project: 'projects', sweep: 'review', dump: 'now', triage: 'inbox', savers: 'now' }[state.view] || state.view;
   $('#sidenav').innerHTML = VIEWS.map((v) => `<button class="${navView === v.id ? 'active' : ''}" data-action="nav" data-view="${v.id}" title="${v.label} (${v.key})">
       ${icon(v.id)}<span>${v.label}</span>${counts[v.id] ? `<span class="badge ${v.id === 'projects' || v.id === 'review' ? 'warn' : ''}">${counts[v.id]}</span>` : ''}</button>`).join('');
   const moreActive = !MOBILE_TABS.includes(navView);
@@ -948,6 +1199,10 @@ function render() {
   }).join('');
   const html = (views[state.view] || views.now)();
   $('#main').innerHTML = html;
+  const sessionOn = state.view === 'savers' && state.savers && !state.savers.finished;
+  saversLoop(sessionOn);
+  keepAwake(sessionOn && state.savers.running);
+  if (sessionOn) saversTick();
   const af = $('#main [autofocus]');
   if (af && matchMedia('(pointer: fine)').matches) af.focus();
   document.title = counts.inbox ? `(${counts.inbox}) Clearhead` : 'Clearhead';
@@ -1058,6 +1313,31 @@ const actions = {
   },
   'editor-cancel': () => $('#editor').close(),
   'cal-add': (el, id) => openCalendar(id, el.dataset.kind),
+  'savers-start': (el) => saversBegin(el.dataset.preset || saversSettings(doc().settings).preset),
+  'savers-toggle': () => {
+    const sv = state.savers;
+    if (sv.running) { sv.left = svLeft(sv); sv.running = false; } else { sv.endAt = Date.now() + sv.left; sv.running = true; }
+    render();
+  },
+  'savers-more': () => {
+    const sv = state.savers;
+    if (sv.running) sv.endAt += 60000; else sv.left += 60000;
+    sv.mins = [...sv.mins];
+    sv.mins[sv.i] += 1;
+    render();
+  },
+  'savers-done': () => { saversMark(STEPS[state.savers.i].id); saversGoto(state.savers.i + 1); },
+  'savers-next': () => saversGoto(state.savers.i + 1),
+  'savers-skip': () => saversGoto(state.savers.i + 1),
+  'savers-back': () => {
+    const sv = state.savers;
+    let i = sv.i - 1;
+    while (i > 0 && sv.mins[i] === 0) i--;
+    saversGoto(Math.max(0, i));
+  },
+  'savers-quit': () => { state.savers = null; go('now'); },
+  'savers-close': (el) => { state.savers = null; go(el.dataset.to); },
+  'savers-later': () => { prefs.set('saversLater', today()); render(); },
   'push-test': (el) => {
     pushStatus('Sending a test…');
     push.test(el.dataset.kind)
@@ -1176,6 +1456,25 @@ document.addEventListener('submit', (e) => {
     state.now.contexts = state.now.contexts.filter((c) => list.includes(c));
     prefs.set('nowCtx', state.now);
     toast('Contexts saved');
+  } else if (kind === 'savers-insight') {
+    const item = capture(val('title'), '', { src: 'Miracle Morning' });
+    if (item) { state.savers.captured++; form.reset(); toast('Parked in your inbox. Back to it.'); }
+  } else if (kind === 'savers-text') {
+    store.updateSettings({ savers: { ...saversSettings(doc().settings), [form.dataset.key]: form.elements.text.value.trim() } });
+  } else if (kind === 'savers-settings') {
+    const f = form.elements;
+    store.updateSettings({ savers: {
+      ...saversSettings(doc().settings),
+      preset: f.preset.value,
+      custom: STEPS.map((s) => Number(f[`min-${s.id}`].value) || 0),
+      affirmations: f.affirmations.value.trim(),
+      vision: f.vision.value.trim(),
+      exercises: f.exercises.value.trim(),
+      breathing: f.breathing.checked,
+      autoAdvance: f.autoAdvance.checked,
+      nowPrompt: f.nowPrompt.checked,
+    } });
+    toast('Miracle Morning saved');
   } else if (kind === 'push') {
     const f = form.elements;
     const server = val('server').replace(/\/+$/, '');
@@ -1186,6 +1485,7 @@ document.addEventListener('submit', (e) => {
       morning: { on: f.morningOn.checked, time: f.morningTime.value || '07:30' },
       evening: { on: f.eveningOn.checked, time: f.eveningTime.value || '18:00' },
       quotes: { on: f.quotesOn.checked && times.length > 0, times: times.length ? times : ['12:30'] },
+      savers: { on: f.saversOn.checked, time: f.saversTime.value || '06:00' },
     };
     pushStatus('Connecting…');
     push.enable()
@@ -1249,6 +1549,10 @@ async function start() {
     history.replaceState(null, '', location.pathname);
     setTimeout(() => $('#capture-input').focus(), 50);
   }
+  if (params.has('savers')) {
+    history.replaceState(null, '', location.pathname);
+    go('savers');
+  }
   if (params.has('process')) {
     history.replaceState(null, '', location.pathname);
     processStart();
@@ -1256,7 +1560,7 @@ async function start() {
   render();
   saveSnapshot(store.doc);
   sync.run();
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { render(); sync.run(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (!isEditingMain()) render(); sync.run(); } });
   addEventListener('online', () => sync.run());
   setInterval(() => { if (document.visibilityState === 'visible') sync.run(); }, 5 * 60 * 1000);
   navigator.storage?.persist?.().catch(() => {});
