@@ -1,9 +1,10 @@
 import {
   isoDay, addDays, daysBetween, parseCapture, vagueHint, live, openItems, inboxItems, nextActions,
-  projectHealth, suggestNow, reviewStatus, isAvailable, normalizeDoc,
+  projectHealth, suggestNow, reviewStatus, isAvailable, normalizeDoc, uid,
+  isParked, parkedItems, followUpsOf, wouldCycle, refTags, findRefs, parseTags,
 } from './model.js';
 import { store, prefs } from './store.js';
-import { sync } from './sync.js';
+import { sync, files } from './sync.js';
 import { buildSweep, splitLines } from './sweep.js';
 import { buildBrainDump, TRIAGE, triagePatch } from './braindump.js';
 import { push, saveSnapshot, parseTimes } from './push.js';
@@ -49,6 +50,11 @@ const ICONS = {
   review: '<path d="M4 12a8 8 0 1 0 3-6.2"/><path d="M4 4v4h4"/><path d="m9 12 2 2 4-4"/>',
   done: '<path d="m5 12 5 5L20 7"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  reference: '<path d="M21 12.5 12.6 21a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.6 8.4"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  note: '<path d="M5 3h10l4 4v14H5z"/><path d="M9 11h6M9 15h6"/>',
+  file: '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 17-5-5-8 8"/>',
   more: '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
   star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/>',
 };
@@ -61,6 +67,7 @@ const VIEWS = [
   { id: 'projects', label: 'Projects', key: '4' },
   { id: 'waiting', label: 'Waiting for', key: '5' },
   { id: 'someday', label: 'Someday / Maybe', key: '6' },
+  { id: 'reference', label: 'Reference', key: 'r' },
   { id: 'upcoming', label: 'Upcoming', key: '7' },
   { id: 'review', label: 'Weekly review', key: '8' },
   { id: 'done', label: 'Done', key: '9' },
@@ -79,6 +86,11 @@ const state = {
   editingId: null,
   pushMsg: '',
   savers: null, // running Miracle Morning session
+  refQuery: '',
+  refTag: null,
+  refEdit: null, // reference being added or edited
+  shareQueue: [],
+  nextPromptFor: null,
 };
 if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage', 'savers'].includes(state.view)) state.view = 'now';
 
@@ -104,6 +116,13 @@ function chips(i, { project = true } = {}) {
     out.push(`<span class="chip block ${cls}">${esc(fmtDay(i.schedDate))} ${esc(i.schedTime)}–${esc(blockEnd(i.schedDate, i.schedTime, blockLength(i)).time)}</span>`);
   }
   if (i.start && i.start > t) out.push(`<span class="chip">Starts ${esc(fmtDay(i.start))}</span>`);
+  if (!i.done) {
+    const ups = followUpsOf(doc(), i.id).length;
+    if (ups) out.push(`<span class="chip rel">then ${ups} more</span>`);
+    if (isParked(doc(), i)) out.push(`<span class="chip">after: ${esc(doc().items[i.after].title)}</span>`);
+  }
+  const nrefs = findRefs(doc(), { itemId: i.id }).length;
+  if (nrefs) out.push(`<span class="chip">${nrefs} ref${nrefs > 1 ? 's' : ''}</span>`);
   if (i.cal && !i.done) {
     const states = Object.keys(i.cal).filter((k) => i.cal[k]).map((k) => calendarState(i, k));
     if (states.includes('outdated')) out.push('<span class="chip warn">Calendar out of date</span>');
@@ -294,6 +313,8 @@ views.project = () => {
   const h = projectHealth(d, p, today());
   const doneItems = live(d.items).filter((i) => i.projectId === p.id && i.done).sort((a, b) => b.completedAt - a.completedAt);
   const other = h.actions.filter((i) => i.list !== 'next' && i.list !== 'waiting');
+  const queued = parkedItems(d).filter((i) => i.projectId === p.id);
+  const refs = findRefs(d, { projectId: p.id });
   return `<button class="link back" data-action="nav" data-view="projects">← Projects</button>
     <form class="project-edit" data-form="project-edit" data-pid="${p.id}">
       <input class="title-input" name="title" value="${esc(p.title)}" aria-label="Project name">
@@ -310,6 +331,10 @@ views.project = () => {
     ${h.nexts.length ? `<h2 class="group">Next actions</h2>${taskList(h.nexts, { project: false })}` : ''}
     ${h.waiting.length ? `<h2 class="group">Waiting for</h2>${taskList(h.waiting, { project: false })}` : ''}
     ${other.length ? `<h2 class="group">Other</h2>${taskList(other, { project: false })}` : ''}
+    ${queued.length ? `<h2 class="group">Queued: start when their trigger is done</h2>${taskList(queued, { project: false })}` : ''}
+    <h2 class="group">Reference</h2>
+    ${refs.length ? `<ul class="refs">${refs.map(refRow).join('')}</ul>` : ''}
+    ${refAddBar({ projectId: p.id })}
     ${doneItems.length ? `<details><summary>Done (${doneItems.length})</summary>${taskList(doneItems, { project: false })}</details>` : ''}`;
 };
 
@@ -347,7 +372,8 @@ views.upcoming = () => {
     ${days.map((k) => `<h2 class="group ${k < t ? 'bad-text' : ''}">${esc(fmtDay(k))} <span class="count">${esc(k)}</span></h2><ul class="tasks">${byDay.get(k)
     .sort((a, b) => (a.schedTime || '99').localeCompare(b.schedTime || '99'))
     .map((i) => taskRow(i, { extra: calButtons(i) })).join('')}</ul>`).join('')
-    || empty('Nothing dated. That\'s fine. GTD only uses dates for real deadlines.')}`;
+    || empty('Nothing dated. That\'s fine. GTD only uses dates for real deadlines.')}
+    ${(() => { const q = parkedItems(doc()); return q.length ? `<h2 class="group">Queued follow-ups <span class="count">${q.length}</span></h2>${taskList(q)}` : ''; })()}`;
 };
 
 // "Add to Google Calendar" buttons for whichever dates an item has that aren't in the calendar yet.
@@ -814,7 +840,7 @@ views.more = () => {
     review: reviewStatus(d, today()).due ? 'due' : '',
   };
   return `${header('More')}
-    <ul class="menu">${['waiting', 'someday', 'upcoming', 'review', 'done', 'settings'].map((id) => {
+    <ul class="menu">${['waiting', 'someday', 'reference', 'upcoming', 'review', 'done', 'settings'].map((id) => {
     const v = VIEWS.find((x) => x.id === id);
     return `<li><button data-action="nav" data-view="${id}">${icon(id)}<span>${v.label}</span>${counts[id] ? `<span class="badge ${id === 'review' ? 'warn' : ''}">${counts[id]}</span>` : ''}</button></li>`;
   }).join('')}</ul>`;
@@ -1108,6 +1134,8 @@ function openEditor(id) {
     <p class="hint cal-status">${esc(calendarKinds(i).map((k) => `${k === 'due' ? 'Deadline' : 'Time block'}: ${{ none: 'not in calendar', added: 'added to calendar', outdated: 'calendar out of date' }[calendarState(i, k)]}`).join(' · '))}</p>
     <fieldset><legend>Contexts</legend><div class="filter-row">${ctxs.map((c) => `<label class="pill-check"><input type="checkbox" name="ctx" value="${esc(c)}" ${i.contexts?.includes(c) ? 'checked' : ''}><span>@${esc(c)}</span></label>`).join('')}</div></fieldset>
     <label class="waiting-field">Waiting on<input name="waitingOn" value="${esc(i.waitingOn || '')}"></label>
+    <section class="rel" id="rel-section">${relSection(i)}</section>
+    <section class="rel" id="ref-attach">${itemRefsSection(i)}</section>
     <div class="row end"><button type="button" class="btn danger" data-action="editor-delete">Delete</button><span class="spacer"></span>
       <button type="button" class="btn" data-action="editor-cancel">Cancel</button><button class="btn primary">Save</button></div>`;
   dlg.showModal();
@@ -1133,6 +1161,280 @@ function saveEditor(form, { offer = true } = {}) {
   $('#editor').close();
   if (offer) offerCalendar(id);
   return id;
+}
+
+// ---------- relations: "when this is done" (in the action editor) ----------
+function relSection(i) {
+  const d = doc();
+  const pred = i.after && d.items[i.after] && !d.items[i.after].deleted ? d.items[i.after] : null;
+  const ups = followUpsOf(d, i.id);
+  const projects = live(d.projects).filter((p) => p.status === 'active').sort((a, b) => a.title.localeCompare(b.title));
+  const candidates = openItems(d).filter((x) => x.id !== i.id && !wouldCycle(d, x.id, i.id) && ['next', 'inbox', 'waiting', 'someday'].includes(x.list))
+    .sort((a, b) => a.title.localeCompare(b.title)).slice(0, 300);
+  const projName = (pid) => (pid && d.projects[pid] && !d.projects[pid].deleted ? d.projects[pid].title : '');
+  const upLabel = (u) => `${u.list === 'waiting' ? `Wait for: ${esc(u.title)}${u.waitingOn ? ` (${esc(u.waitingOn)})` : ''}` : `Then: ${esc(u.title)}`}${u.afterOffset ? ` · +${u.afterOffset}d` : ''}${u.projectId !== i.projectId && projName(u.projectId) ? ` · ${esc(projName(u.projectId))}` : ''}`;
+  return `<h3 class="rel-h">When this is done</h3>
+    ${pred ? `<p class="hint">Starts after <strong>${esc(pred.title)}</strong>${pred.done ? ' (done)' : ''}. <button type="button" class="link" data-action="rel-unlink" data-rid="${i.id}">Start now instead</button></p>` : ''}
+    ${ups.length ? `<ul class="rel-list">${ups.map((u) => `<li><span>${upLabel(u)}</span><span><button type="button" class="link" data-action="rel-unlink" data-rid="${u.id}">Unlink</button> · <button type="button" class="link bad-text" data-action="rel-remove" data-rid="${u.id}">Remove</button></span></li>`).join('')}</ul>`
+    : '<p class="hint">Queue a follow-up that appears automatically when you tick this off.</p>'}
+    <div class="rel-add">
+      <select name="relKind" aria-label="Follow-up type"><option value="next">Then do</option><option value="waiting">Then wait for</option></select>
+      <input name="relTitle" placeholder="e.g. Email the quote to Sam" aria-label="Follow-up">
+      <input name="relWho" class="rel-who" placeholder="From whom" aria-label="Waiting on" hidden>
+      <label class="rel-off"><span class="rel-off-label">start</span> after <input type="number" name="relOffset" min="0" max="365" value="0" aria-label="Days after"> days</label>
+      <select name="relProject" aria-label="Project for follow-up"><option value="">No project</option>${projects.map((p) => `<option value="${p.id}" ${p.id === i.projectId ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}</select>
+      <button type="button" class="btn small" data-action="rel-add">Add follow-up</button>
+    </div>
+    ${candidates.length ? `<div class="rel-link"><select name="relExisting" aria-label="Existing action"><option value="">Or queue an existing action…</option>${candidates.map((c) => `<option value="${c.id}">${esc(c.title)}${projName(c.projectId) ? ` (${esc(projName(c.projectId))})` : ''}</option>`).join('')}</select>
+      <button type="button" class="btn small" data-action="rel-link">Queue it</button></div>` : ''}`;
+}
+
+function refreshEditorParts() {
+  if (!$('#editor').open || !state.editingId) return;
+  const i = doc().items[state.editingId];
+  if (!i || i.deleted) return;
+  $('#rel-section').innerHTML = relSection(i);
+  $('#ref-attach').innerHTML = itemRefsSection(i);
+}
+
+// ---------- "what's next?" after finishing a project action ----------
+function openNextPrompt(doneId, released = []) {
+  const d = doc();
+  const i = d.items[doneId];
+  const p = d.projects[i.projectId];
+  const h = projectHealth(d, p, today());
+  state.nextPromptFor = { itemId: doneId, projectId: p.id };
+  const open = [h.nexts.length && plural(h.nexts.length, 'next action'), h.waiting.length && `${h.waiting.length} waiting`].filter(Boolean).join(', ');
+  $('#next-form').innerHTML = `
+    <span class="label">${esc(p.title)}</span>
+    <h2 class="q">What's next?</h2>
+    <p class="hint">Done: <s>${esc(i.title)}</s></p>
+    ${released.length ? `<p class="np-released">Now active: ${released.map((r) => `<strong>${esc(r.title)}</strong>`).join(', ')}</p>` : ''}
+    <p class="hint">${open ? `Still open: ${open}.` : '<span class="bad-text">Nothing else is open in this project.</span>'}</p>
+    <label>Next action<input name="next" placeholder="e.g. Call builder to book survey @phone" data-vague autocomplete="off"></label>
+    <p class="vague-hint" aria-live="polite"></p>
+    <div class="grid2"><label>Waiting for (what)<input name="wTitle" placeholder="e.g. Quote for new boiler" autocomplete="off"></label>
+      <label>From whom<input name="wWho" placeholder="Name" autocomplete="off"></label></div>
+    <div class="row end"><button type="button" class="btn" data-action="np-complete">Project complete</button><span class="spacer"></span>
+      <button type="button" class="btn" data-action="np-later">Decide later</button><button class="btn primary">Add</button></div>`;
+  $('#next-dialog').showModal();
+  if (matchMedia('(pointer: fine)').matches) $('#next-form [name="next"]').focus();
+}
+
+function saveNextPrompt(form) {
+  const { projectId } = state.nextPromptFor || {};
+  const f = form.elements;
+  const next = f.next.value.trim();
+  const who = f.wWho.value.trim();
+  const what = f.wTitle.value.trim();
+  if (!next && !who && !what) { toast('Type a next action or a waiting-for, or choose Decide later'); return; }
+  if (next) {
+    const p = parseCapture(next, today());
+    store.addItem({ title: p.title, list: 'next', projectId, contexts: p.contexts, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start, schedDate: p.schedDate, schedTime: p.schedTime });
+  }
+  if (who || what) store.addItem({ title: what || `Reply from ${who}`, list: 'waiting', waitingOn: who, projectId });
+  $('#next-dialog').close();
+  toast(`Added to ${doc().projects[projectId]?.title || 'project'}`);
+}
+
+// ---------- reference: links, notes and files (stored in Dropbox, cached offline) ----------
+const FILE_CACHE = 'clearhead-files';
+const KEEP_FILES = 60; // offline copies kept per device
+const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
+const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n || 0} B`);
+const safeName = (name) => String(name || 'file').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(-80) || 'file';
+const fileKey = (path) => new URL(`__files/${encodeURIComponent(path.toLowerCase())}`, document.baseURI).href;
+const refKind = (r) => (r.kind === 'file' ? ((r.file?.type || '').startsWith('image/') ? 'image' : 'file') : r.kind);
+
+async function cacheFile(path, blob) {
+  try {
+    const c = await caches.open(FILE_CACHE);
+    await c.put(fileKey(path), new Response(blob, { headers: { 'Content-Type': blob.type || 'application/octet-stream' } }));
+    const keys = await c.keys();
+    for (const k of keys.slice(0, Math.max(0, keys.length - KEEP_FILES))) await c.delete(k);
+  } catch { /* storage unavailable */ }
+}
+
+async function cachedFile(path) {
+  try {
+    const res = await (await caches.open(FILE_CACHE)).match(fileKey(path));
+    return res ? await res.blob() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function openFile(r) {
+  let blob = await cachedFile(r.file.path);
+  if (!blob) {
+    toast('Downloading…');
+    try {
+      blob = await files.download(r.file.path);
+      await cacheFile(r.file.path, blob);
+    } catch (e) {
+      toast(navigator.onLine ? e.message : 'You\'re offline and this file isn\'t saved on this device yet.');
+      return;
+    }
+  }
+  const typed = blob.type ? blob : new Blob([blob], { type: r.file.type || 'application/octet-stream' });
+  const url = URL.createObjectURL(typed);
+  if ((r.file.type || '').startsWith('image/')) {
+    $('#viewer').innerHTML = `<figure class="viewer-fig"><img src="${url}" alt="${esc(r.title)}"><figcaption>${esc(r.title)}</figcaption></figure>
+      <div class="row end"><a class="btn" href="${url}" download="${esc(r.file.name)}">Download</a><button type="button" class="btn primary" data-action="viewer-close">Close</button></div>`;
+    $('#viewer').showModal();
+  } else {
+    const a = Object.assign(document.createElement('a'), { href: url, download: r.file.name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+
+function refRow(r) {
+  const d = doc();
+  const p = r.projectId && d.projects[r.projectId] && !d.projects[r.projectId].deleted ? d.projects[r.projectId] : null;
+  const it = r.itemId && d.items[r.itemId] && !d.items[r.itemId].deleted ? d.items[r.itemId] : null;
+  const meta = [
+    r.kind === 'link' ? esc(hostOf(r.url)) : '',
+    r.file ? `${esc(r.file.name)} · ${fmtSize(r.file.size)}` : '',
+    r.kind === 'note' && r.note ? esc(r.note.split('\n')[0].slice(0, 90)) : '',
+  ].filter(Boolean).join(' · ');
+  return `<li class="ref" data-ref="${r.id}">
+    <button type="button" class="ref-open" data-action="ref-open">${icon(refKind(r))}<span class="ref-text"><span class="task-title">${esc(r.title || r.file?.name || r.url || 'Untitled')}</span>${meta ? `<span class="task-notes">${meta}</span>` : ''}</span></button>
+    <button type="button" class="link ref-edit" data-action="ref-edit">Edit</button>
+    ${(r.tags || []).length || p || it ? `<div class="chips">${(r.tags || []).map((t) => `<span class="chip ctx">#${esc(t)}</span>`).join('')}${p ? `<button type="button" class="chip proj" data-action="open-project" data-pid="${p.id}">${esc(p.title)}</button>` : ''}${it ? `<span class="chip">${esc(it.title)}</span>` : ''}</div>` : ''}
+  </li>`;
+}
+
+function refAddBar({ projectId = '', itemId = '' } = {}) {
+  const ctx = `data-pid="${esc(projectId)}" data-iid="${esc(itemId)}"`;
+  return `<div class="row ref-add"><button type="button" class="btn small" data-action="ref-new" data-kind="link" ${ctx}>+ Link</button>
+    <button type="button" class="btn small" data-action="ref-new" data-kind="note" ${ctx}>+ Note</button>
+    <label class="btn small">+ File<input type="file" hidden data-action="ref-file" ${ctx}></label>
+    <label class="btn small touch-only">Take photo<input type="file" accept="image/*" capture="environment" hidden data-action="ref-file" ${ctx}></label></div>`;
+}
+
+function itemRefsSection(i) {
+  const refs = findRefs(doc(), { itemId: i.id });
+  return `<h3 class="rel-h">Reference</h3>${refs.length ? `<ul class="refs compact">${refs.map(refRow).join('')}</ul>` : ''}${refAddBar({ projectId: i.projectId || '', itemId: i.id })}`;
+}
+
+function refListHtml() {
+  const refs = findRefs(doc(), { q: state.refQuery, tag: state.refTag });
+  return refs.length ? `<ul class="refs">${refs.map(refRow).join('')}</ul>`
+    : empty(state.refQuery || state.refTag ? 'Nothing matches.' : 'Nothing here yet. Add a link, a note, a file or a photo.');
+}
+
+views.reference = () => {
+  const d = doc();
+  const tags = refTags(d);
+  const legacy = openItems(d).filter((i) => i.list === 'reference');
+  return `${header('Reference', `Documents, photos, links and notes you may need later. Files are kept in your Dropbox; once opened they stay available offline on this device.${sync.connected ? '' : ' <strong>Connect Dropbox in Settings to add files.</strong>'}`)}
+    ${refAddBar()}
+    <div class="ref-tools"><input type="search" id="ref-search" placeholder="Search reference…" value="${esc(state.refQuery)}" aria-label="Search reference" autocomplete="off">
+      ${tags.length ? `<div class="filter-row">${['', ...tags].map((t) => `<button class="pill ${(state.refTag || '') === t ? 'on' : ''}" data-action="ref-tag" data-tag="${esc(t)}">${t ? `#${esc(t)}` : 'All'}</button>`).join('')}</div>` : ''}</div>
+    <div id="ref-list">${refListHtml()}</div>
+    ${legacy.length ? `<h2 class="group">Reference notes from your inbox</h2>${taskList(legacy)}` : ''}`;
+};
+
+function openRefDialog({ ref = null, kind = ref?.kind || 'note', file = null, projectId = '', itemId = '', shared = null, prefill = {} } = {}) {
+  const d = doc();
+  const r = ref || { kind, title: prefill.title || '', url: prefill.url || '', note: prefill.note || '', tags: [], projectId: projectId || null };
+  const iid = ref ? ref.itemId : itemId || null;
+  state.refEdit = { id: ref?.id || null, kind, file, itemId: iid, shared };
+  const projects = live(d.projects).filter((p) => p.status !== 'done' || p.id === r.projectId).sort((a, b) => a.title.localeCompare(b.title));
+  const fname = file ? file.name : r.file?.name;
+  const item = iid && d.items[iid] && !d.items[iid].deleted ? d.items[iid] : null;
+  $('#ref-form').innerHTML = `
+    <h2 class="q">${ref ? 'Edit reference' : { link: 'Save a link', note: 'Add a note', file: 'Add a file' }[kind]}</h2>
+    ${fname ? `<p class="ref-filename">${icon(refKind({ kind, file: { type: file?.type || r.file?.type } }))}<span>${esc(fname)} · ${fmtSize(file ? file.size : r.file?.size)}</span></p>` : ''}
+    <label>Title<input name="title" value="${esc(r.title || (file ? file.name.replace(/\.[^.]+$/, '') : ''))}" ${kind === 'note' ? 'required' : ''} autocomplete="off"></label>
+    ${kind === 'link' ? `<label>Address<input name="url" required value="${esc(r.url)}" placeholder="https://…" inputmode="url" autocomplete="off"></label>` : ''}
+    <label>${kind === 'note' ? 'Note' : 'Notes'}<textarea name="note" rows="${kind === 'note' ? 8 : 3}">${esc(r.note)}</textarea></label>
+    <label>Tags (comma-separated)<input name="tags" value="${esc((r.tags || []).join(', '))}" list="ref-tag-list" placeholder="e.g. Finance, Car" autocomplete="off"></label>
+    <datalist id="ref-tag-list">${refTags(d).map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
+    <label>Project<select name="projectId"><option value="">None</option>${projects.map((p) => `<option value="${p.id}" ${r.projectId === p.id ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}</select></label>
+    ${item ? `<p class="hint">Attached to action: <strong>${esc(item.title)}</strong></p>` : ''}
+    ${shared && !file ? '<p><button type="button" class="link" data-action="ref-to-inbox">Send to Inbox instead</button></p>' : ''}
+    <p class="ref-status hint" aria-live="polite"></p>
+    <div class="row end">${ref ? '<button type="button" class="btn danger" data-action="ref-delete">Delete</button>' : ''}<span class="spacer"></span>
+      <button type="button" class="btn" data-action="ref-cancel">Cancel</button><button class="btn primary">${kind === 'file' && !ref ? 'Upload & save' : 'Save'}</button></div>`;
+  $('#ref-dialog').showModal();
+}
+
+async function saveRef(form) {
+  const st = state.refEdit;
+  const f = form.elements;
+  const fields = { title: f.title.value.trim(), note: f.note.value, tags: parseTags(f.tags.value), projectId: f.projectId.value || null };
+  if (st.kind === 'link') {
+    let url = f.url.value.trim();
+    if (!/^[a-z][\w+.-]*:/i.test(url)) url = `https://${url}`;
+    fields.url = url;
+    if (!fields.title) fields.title = hostOf(url) || url;
+  }
+  if (st.id) {
+    store.updateRef(st.id, fields);
+    $('#ref-dialog').close();
+    toast('Saved');
+    refreshEditorParts();
+    return;
+  }
+  if (st.kind === 'file') {
+    const status = form.querySelector('.ref-status');
+    const buttons = [...form.querySelectorAll('button')];
+    buttons.forEach((b) => { b.disabled = true; });
+    status.textContent = 'Uploading to Dropbox…';
+    try {
+      const id = uid();
+      const meta = await files.upload(`/files/${id}-${safeName(st.file.name)}`, st.file);
+      await cacheFile(meta.path, st.file);
+      store.addRef({ ...fields, id, kind: 'file', title: fields.title || st.file.name, itemId: st.itemId, file: { path: meta.path, name: st.file.name, size: st.file.size, type: st.file.type || '' } });
+    } catch (e) {
+      status.textContent = navigator.onLine ? e.message : 'You\'re offline. Files need a connection to upload.';
+      buttons.forEach((b) => { b.disabled = false; });
+      return;
+    }
+  } else {
+    store.addRef({ ...fields, kind: st.kind, itemId: st.itemId });
+  }
+  $('#ref-dialog').close();
+  toast('Saved to Reference');
+  refreshEditorParts();
+}
+
+// Files and links shared from other apps arrive via the service worker (share target).
+async function importShare(shareId) {
+  try {
+    const c = await caches.open('clearhead-share');
+    const base = new URL(`__share/${shareId}/`, document.baseURI).href;
+    const metaRes = await c.match(`${base}meta`);
+    if (!metaRes) return;
+    const meta = await metaRes.json();
+    const queue = [];
+    for (let k = 0; k < meta.files.length; k++) {
+      const res = await c.match(base + k);
+      if (res) queue.push({ kind: 'file', file: new File([await res.blob()], meta.files[k].name, { type: meta.files[k].type }) });
+    }
+    for (const key of await c.keys()) if (key.url.startsWith(base)) await c.delete(key);
+    const text = [meta.title, meta.text].filter(Boolean).join(' ').trim();
+    const url = meta.url || (text.match(/https?:\/\/\S+/) || [''])[0];
+    if (!queue.length && (text || url)) {
+      queue.push(url
+        ? { kind: 'link', prefill: { url, title: text.replace(url, '').trim() } }
+        : { kind: 'note', prefill: { title: text.slice(0, 80), note: text } });
+    }
+    state.shareQueue = queue;
+    if (queue.length) go('reference');
+    nextShare();
+  } catch (e) {
+    toast(`Couldn't read the shared item (${e.message})`);
+  }
+}
+
+function nextShare() {
+  const s = state.shareQueue?.shift();
+  if (s) openRefDialog({ kind: s.kind, file: s.file, prefill: s.prefill, shared: s });
 }
 
 // ---------- capture ----------
@@ -1225,8 +1527,79 @@ const actions = {
   'toggle-done': (el, id) => {
     const i = doc().items[id];
     store.updateItem(id, { done: !i.done });
-    if (!i.done) toast('Done', () => store.updateItem(id, { done: false }));
+    if (i.done) return;
+    const released = store.lastActivated;
+    toast(released.length ? `Done. Now active: ${released.map((r) => r.title).join(', ')}` : 'Done', () => store.updateItem(id, { done: false }));
+    const proj = i.projectId && doc().projects[i.projectId];
+    if (proj && !proj.deleted && proj.status === 'active') openNextPrompt(id, released);
   },
+  'np-later': () => {
+    $('#next-dialog').close();
+    const p = doc().projects[state.nextPromptFor?.projectId];
+    if (p && projectHealth(doc(), p, today()).stalled) toast(`${p.title} has no next action now. It will show as stalled.`);
+  },
+  'np-complete': () => {
+    const pid = state.nextPromptFor?.projectId;
+    $('#next-dialog').close();
+    store.updateProject(pid, { status: 'done' });
+    toast('Project complete', () => store.updateProject(pid, { status: 'active' }));
+  },
+  'rel-add': () => {
+    const f = $('#editor-form').elements;
+    const kind = f.relKind.value;
+    const who = f.relWho.value.trim();
+    const title = f.relTitle.value.trim() || (kind === 'waiting' && who ? `Reply from ${who}` : '');
+    if (!title) { toast('Describe the follow-up first'); return; }
+    if (kind === 'waiting' && !who) { toast('Who will you be waiting on?'); return; }
+    store.addItem({ title, list: kind, waitingOn: kind === 'waiting' ? who : '', after: state.editingId, afterOffset: Math.max(0, Number(f.relOffset.value) || 0), projectId: f.relProject.value || null });
+    refreshEditorParts();
+    toast('Follow-up queued');
+  },
+  'rel-link': () => {
+    const fid = $('#editor-form').elements.relExisting.value;
+    if (!fid) return;
+    if (wouldCycle(doc(), fid, state.editingId)) { toast('That would create a loop'); return; }
+    store.updateItem(fid, { after: state.editingId, afterOffset: 0 });
+    refreshEditorParts();
+    toast('Queued behind this action');
+  },
+  'rel-unlink': (el) => { store.updateItem(el.dataset.rid, { after: null }); refreshEditorParts(); },
+  'rel-remove': (el) => {
+    const before = doc().items[el.dataset.rid];
+    store.deleteItem(el.dataset.rid);
+    refreshEditorParts();
+    toast('Follow-up removed', () => { store.restoreItem(before); refreshEditorParts(); });
+  },
+  'ref-new': (el) => openRefDialog({ kind: el.dataset.kind, projectId: el.dataset.pid, itemId: el.dataset.iid }),
+  'ref-tag': (el) => { state.refTag = el.dataset.tag || null; render(); },
+  'ref-edit': (el) => openRefDialog({ ref: doc().refs[el.closest('[data-ref]').dataset.ref] }),
+  'ref-open': (el) => {
+    const r = doc().refs[el.closest('[data-ref]').dataset.ref];
+    if (!r) return;
+    if (r.kind === 'link') window.open(r.url, '_blank', 'noopener');
+    else if (r.kind === 'file') openFile(r);
+    else openRefDialog({ ref: r });
+  },
+  'ref-cancel': () => $('#ref-dialog').close(),
+  'ref-delete': () => {
+    const r = doc().refs[state.refEdit?.id];
+    if (!r || !confirm(`Delete "${r.title}"${r.file ? ' and its file in Dropbox' : ''}?`)) return;
+    store.deleteRef(r.id);
+    if (r.file) {
+      files.remove(r.file.path).catch(() => {});
+      caches.open(FILE_CACHE).then((c) => c.delete(fileKey(r.file.path))).catch(() => {});
+    }
+    $('#ref-dialog').close();
+    toast('Deleted');
+    refreshEditorParts();
+  },
+  'ref-to-inbox': () => {
+    const p = state.refEdit?.shared?.prefill || {};
+    capture([p.title, p.url].filter(Boolean).join(' ') || p.note || 'Shared item', p.url && p.title ? p.url : '');
+    $('#ref-dialog').close();
+    toast('Captured to Inbox');
+  },
+  'viewer-close': () => $('#viewer').close(),
   'toggle-focus': (el, id) => store.updateItem(id, { focus: !doc().items[id].focus }),
   edit: (el, id) => openEditor(id),
   'now-ctx': (el) => {
@@ -1387,6 +1760,17 @@ document.addEventListener('change', (e) => {
     const checks = { ...reviewChecks(rs.periodStart), [el.dataset.step]: el.checked };
     prefs.set('reviewChecks', { period: rs.periodStart, done: checks });
     render();
+  } else if (el.dataset.action === 'ref-file') {
+    const file = el.files[0];
+    el.value = '';
+    if (file) openRefDialog({ kind: 'file', file, projectId: el.dataset.pid, itemId: el.dataset.iid });
+  } else if (el.name === 'relKind') {
+    const f = el.form.elements;
+    const waiting = el.value === 'waiting';
+    f.relWho.hidden = !waiting;
+    el.form.querySelector('.rel-off-label').textContent = waiting ? 'check back' : 'start';
+    if (waiting && f.relOffset.value === '0') f.relOffset.value = '7';
+    if (!waiting && f.relOffset.value === '7') f.relOffset.value = '0';
   } else if (el.dataset.action === 'cal-offer') {
     prefs.set('calOffer', el.checked);
   } else if (el.dataset.action === 'review-day') {
@@ -1405,6 +1789,7 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (el.id === 'capture-input') capturePreview();
+  if (el.id === 'ref-search') { state.refQuery = el.value; $('#ref-list').innerHTML = refListHtml(); }
   if (el.hasAttribute('data-vague')) {
     const hint = el.closest('form, .wizard')?.querySelector('.vague-hint');
     if (hint) hint.textContent = vagueHint(el.value) || '';
@@ -1432,6 +1817,8 @@ document.addEventListener('submit', (e) => {
     return;
   }
   if (form.id === 'editor-form') { saveEditor(form); return; }
+  if (form.id === 'next-form') { saveNextPrompt(form); return; }
+  if (form.id === 'ref-form') { saveRef(form); return; }
   const kind = form.dataset.form;
   const val = (n) => form.elements[n]?.value.trim() ?? '';
   if (kind === 'new-project') {
@@ -1505,7 +1892,8 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'walk-text' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); walkMove(e.target.dataset.walk, 1); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (e.key === 'Escape' && e.target.id === 'capture-input') { e.target.blur(); return; }
-  if (typing || e.ctrlKey || e.metaKey || e.altKey || $('#editor').open) return;
+  if (e.key === 'Enter' && e.target.name === 'relTitle') { e.preventDefault(); actions['rel-add'](); return; }
+  if (typing || e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
   if (state.view === 'triage') {
     const t = TRIAGE.find((x) => x.key === e.key.toLowerCase()) || (e.key === 'Enter' && TRIAGE[0]);
     const id = $('.triage-card')?.dataset.id;
@@ -1518,6 +1906,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 $('#editor').addEventListener('close', () => { state.editingId = null; });
+$('#ref-dialog').addEventListener('close', () => { state.refEdit = null; setTimeout(nextShare, 0); });
+$('#viewer').addEventListener('close', () => { $('#viewer').innerHTML = ''; });
 
 // ---------- startup ----------
 store.subscribe(({ local }) => {
@@ -1544,6 +1934,11 @@ async function start() {
       toast('Shared item captured to Inbox');
     }
     history.replaceState(null, '', location.pathname);
+  }
+  if (params.has('shared')) {
+    const id = params.get('shared');
+    history.replaceState(null, '', location.pathname);
+    importShare(id);
   }
   if (params.has('capture')) {
     history.replaceState(null, '', location.pathname);

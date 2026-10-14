@@ -32,9 +32,14 @@ const server = http.createServer((req, res) => {
 }).listen(0);
 const BASE = `http://localhost:${server.address().port}/`;
 
-// ---- mock Dropbox: one file with revisions ----
-const dropbox = { content: null, rev: 0 };
-async function mockDropbox(context) {
+// ---- mock Dropbox: an app folder of files with revisions ----
+function makeDropbox() {
+  const db = { files: new Map(), deleted: [], downloads: [], revs: 0 };
+  Object.defineProperty(db, 'content', { get: () => db.files.get('/clearhead.json')?.body.toString() });
+  return db;
+}
+const dropbox = makeDropbox();
+async function mockDropbox(context, db = dropbox) {
   await context.route('https://www.dropbox.com/oauth2/authorize**', (route) => {
     const u = new URL(route.request().url());
     route.fulfill({ status: 302, headers: { location: `${u.searchParams.get('redirect_uri')}?code=CODE&state=${u.searchParams.get('state')}` } });
@@ -43,19 +48,34 @@ async function mockDropbox(context) {
     json: { access_token: 'AT', expires_in: 14400, refresh_token: 'RT' },
   }));
   await context.route('https://content.dropboxapi.com/2/files/download', (route) => {
-    if (!dropbox.content) return route.fulfill({ status: 409, json: { error_summary: 'path/not_found/..' } });
+    const { path: p } = JSON.parse(route.request().headers()['dropbox-api-arg']);
+    db.downloads.push(p);
+    const f = db.files.get(p.toLowerCase());
+    if (!f) return route.fulfill({ status: 409, json: { error_summary: 'path/not_found/..' } });
     return route.fulfill({
-      body: dropbox.content,
-      headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Result': JSON.stringify({ rev: String(dropbox.rev) }), 'Access-Control-Expose-Headers': 'Dropbox-API-Result' },
+      body: f.body,
+      headers: { 'Content-Type': 'application/octet-stream', 'Dropbox-API-Result': JSON.stringify({ rev: f.rev }), 'Access-Control-Expose-Headers': 'Dropbox-API-Result' },
     });
   });
   await context.route('https://content.dropboxapi.com/2/files/upload', (route) => {
     const arg = JSON.parse(route.request().headers()['dropbox-api-arg']);
-    const ok = arg.mode['.tag'] === 'add' ? !dropbox.content : arg.mode.update === String(dropbox.rev);
-    if (!ok) return route.fulfill({ status: 409, json: { error_summary: 'path/conflict/..' } });
-    dropbox.content = route.request().postData();
-    dropbox.rev++;
-    return route.fulfill({ json: { rev: String(dropbox.rev) } });
+    let p = arg.path;
+    const existing = db.files.get(p.toLowerCase());
+    if (arg.mode['.tag'] === 'add' && existing) {
+      if (!arg.autorename) return route.fulfill({ status: 409, json: { error_summary: 'path/conflict/..' } });
+      p = p.replace(/(\.[^./]*)?$/, ' (1)$1');
+    }
+    if (arg.mode['.tag'] === 'update' && (!existing || existing.rev !== arg.mode.update)) return route.fulfill({ status: 409, json: { error_summary: 'path/conflict/..' } });
+    const body = route.request().postDataBuffer() || Buffer.alloc(0);
+    const rev = String(++db.revs);
+    db.files.set(p.toLowerCase(), { path: p, body, rev });
+    return route.fulfill({ json: { path_display: p, rev, size: body.length } });
+  });
+  await context.route('https://api.dropboxapi.com/2/files/delete_v2', (route) => {
+    const { path: p } = JSON.parse(route.request().postData());
+    db.deleted.push(p);
+    if (!db.files.delete(p.toLowerCase())) return route.fulfill({ status: 409, json: { error_summary: 'path_lookup/not_found/' } });
+    return route.fulfill({ json: { metadata: { path_display: p } } });
   });
 }
 
@@ -299,6 +319,157 @@ await phone.goto(`${BASE}?share=1&title=Article&url=https%3A%2F%2Fexample.com`);
 await phone.waitForTimeout(300);
 await phone.click('.tabbar [data-view="inbox"]');
 assert.match(await phone.textContent('#main'), /Article/);
+
+// ---------- Project prompts, task relations and Reference (fresh device + Dropbox) ----------
+{
+  const box = makeDropbox();
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await mockDropbox(ctx, box);
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => errors.push(`features: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error' && !/status of 409/.test(m.text())) errors.push(`features: ${m.text()}`); });
+  page.on('dialog', (d) => d.accept());
+  await page.goto(BASE);
+  await page.click('[data-action="dump-dismiss"]');
+  await page.click('#sidenav [data-view="settings"]');
+  await page.fill('[name="appKey"]', 'testkey');
+  await page.click('#sync-settings .btn.primary');
+  await page.waitForURL(BASE);
+  await page.waitForFunction(() => document.querySelector('#sync-dot')?.dataset.state === 'ok');
+  const docNow = () => page.evaluate(() => JSON.parse(localStorage.getItem('clearhead.doc.v1')));
+  const today = await page.evaluate(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; });
+  const plusDays = (n) => { const [y, m, d] = today.split('-').map(Number); const t = new Date(y, m - 1, d + n); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; };
+
+  // Project with one action; an unrelated inbox item to queue across projects.
+  await capture(page, 'Buy paint samples');
+  await page.click('#sidenav [data-view="projects"]');
+  await page.fill('[data-form="new-project"] input', 'Kitchen refit');
+  await page.press('[data-form="new-project"] input', 'Enter');
+  await page.fill('[data-form="project-action"] input', 'Get plumber quote @phone');
+  await page.press('[data-form="project-action"] input', 'Enter');
+
+  // Editor: queue "then do" (+2d), "then wait for" (+7d check-back), and an existing item; attach a link.
+  await page.click('#main .task-body >> text=Get plumber quote');
+  await page.fill('#editor-form [name="relTitle"]', 'Email quote to Sam');
+  await page.fill('#editor-form [name="relOffset"]', '2');
+  await page.click('[data-action="rel-add"]');
+  await page.selectOption('#editor-form [name="relKind"]', 'waiting');
+  assert.equal(await page.inputValue('#editor-form [name="relOffset"]'), '7', 'waiting defaults to a 7-day check-back');
+  await page.fill('#editor-form [name="relWho"]', 'Sam');
+  await page.fill('#editor-form [name="relTitle"]', 'Sam\'s go-ahead');
+  await page.press('#editor-form [name="relTitle"]', 'Enter');
+  const paintId = (Object.values((await docNow()).items).find((i) => i.title === 'Buy paint samples')).id;
+  await page.selectOption('#editor-form [name="relExisting"]', paintId);
+  await page.click('[data-action="rel-link"]');
+  assert.equal(await page.locator('#rel-section .rel-list li').count(), 3);
+  assert.match(await page.textContent('#rel-section'), /Then: Email quote to Sam · \+2d/);
+  assert.match(await page.textContent('#rel-section'), /Wait for: Sam's go-ahead \(Sam\) · \+7d/);
+  assert.match(await page.textContent('#rel-section'), /Then: Buy paint samples(?! ·)/, 'cross-project (no project) shown without project label mismatch');
+  await page.click('#ref-attach [data-action="ref-new"][data-kind="link"]');
+  await page.fill('#ref-form [name="url"]', 'example.com/plumbers');
+  await page.click('#ref-form .btn.primary');
+  assert.match(await page.textContent('#ref-attach'), /example\.com/);
+  await shot(page, '13-editor-relations');
+  await page.click('#editor-form .btn.primary');
+
+  // Queued items are hidden from lists until the trigger is done.
+  assert.match(await page.textContent('#main'), /Queued: start when their trigger is done/);
+  assert.match(await page.textContent('#main'), /then 3 more/);
+  await page.keyboard.press('2');
+  assert.doesNotMatch(await page.textContent('#main'), /Buy paint samples/, 'queued inbox item hidden');
+  await page.click('#sidenav [data-view="projects"]');
+  await page.click('#main .project-main >> text=Kitchen refit');
+
+  // Completing the action releases the follow-ups and asks what's next.
+  await page.click('#main .task:has-text("Get plumber quote") .check');
+  assert.ok(await page.isVisible('#next-dialog'));
+  const released = await page.textContent('#next-form .np-released');
+  for (const t of ['Email quote to Sam', 'Sam\'s go-ahead', 'Buy paint samples']) assert.ok(released.includes(t), `released ${t}`);
+  await shot(page, '14-whats-next');
+  await page.fill('#next-form [name="next"]', 'Choose tiles @errands');
+  await page.fill('#next-form [name="wWho"]', 'Builder');
+  await page.click('#next-form .btn.primary');
+  let d = await docNow();
+  const byTitle = (t) => Object.values(d.items).find((i) => i.title === t && !i.deleted);
+  assert.equal(byTitle('Email quote to Sam').start, plusDays(2));
+  assert.equal(byTitle('Sam\'s go-ahead').due, plusDays(7));
+  assert.equal(byTitle('Sam\'s go-ahead').list, 'waiting');
+  assert.equal(byTitle('Buy paint samples').after, null);
+  assert.equal(byTitle('Choose tiles').list, 'next');
+  assert.deepEqual(byTitle('Choose tiles').contexts, ['errands']);
+  assert.equal(byTitle('Reply from Builder').waitingOn, 'Builder');
+  // Every project completion prompts; "Project complete" closes the project.
+  await page.click('#main .task:has-text("Choose tiles") .check');
+  await page.click('[data-action="np-complete"]');
+  d = await docNow();
+  assert.equal(Object.values(d.projects).find((p) => p.title === 'Kitchen refit').status, 'done');
+
+  // Reference: note with tag, file upload (cached → opens offline), search, delete.
+  await page.click('#sidenav [data-view="reference"]');
+  await page.click('#main [data-action="ref-new"][data-kind="note"]');
+  await page.fill('#ref-form [name="title"]', 'Wifi password');
+  await page.fill('#ref-form [name="note"]', 'hunter2');
+  await page.fill('#ref-form [name="tags"]', 'Home');
+  await page.click('#ref-form .btn.primary');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  await page.setInputFiles('#main .ref-add input[data-action="ref-file"]:not([capture])', { name: 'boiler photo.png', mimeType: 'image/png', buffer: png });
+  assert.match(await page.textContent('#ref-form .ref-filename'), /boiler photo\.png/);
+  await page.fill('#ref-form [name="tags"]', 'Home, Manuals');
+  await page.click('#ref-form .btn.primary');
+  await page.waitForFunction(() => document.querySelectorAll('#ref-list .ref').length === 3);
+  const uploaded = [...box.files.values()].find((f) => /\/files\/.+boiler photo\.png$/.test(f.path));
+  assert.ok(uploaded, 'file uploaded to Dropbox /files');
+  assert.equal(Buffer.compare(uploaded.body, png), 0);
+  await page.fill('#ref-search', 'wifi');
+  assert.equal(await page.locator('#ref-list .ref').count(), 1);
+  await page.fill('#ref-search', '');
+  await page.click('[data-action="ref-tag"][data-tag="Manuals"]');
+  assert.equal(await page.locator('#ref-list .ref').count(), 1);
+  await page.click('#ref-list .ref-open');
+  await page.waitForFunction(() => document.querySelector('#viewer img')?.naturalWidth === 1);
+  assert.equal(box.downloads.filter((p) => p.includes('boiler')).length, 0, 'opened from the offline copy');
+  await page.click('[data-action="viewer-close"]');
+  await page.evaluate(() => caches.delete('clearhead-files'));
+  await page.click('#ref-list .ref-open');
+  await page.waitForFunction(() => document.querySelector('#viewer img')?.naturalWidth === 1);
+  assert.equal(box.downloads.filter((p) => p.includes('boiler')).length, 1, 'downloaded when not cached');
+  await shot(page, '15-reference-viewer');
+  await page.click('[data-action="viewer-close"]');
+  await page.click('#ref-list [data-action="ref-edit"]');
+  await page.click('[data-action="ref-delete"]');
+  assert.deepEqual(box.deleted, [uploaded.path]);
+  await page.click('[data-action="ref-tag"][data-tag=""]');
+  assert.equal(await page.locator('#ref-list .ref').count(), 2);
+  await shot(page, '16-reference');
+
+  // Android share target: a shared file goes to Reference; a shared link can go to the Inbox.
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  if (!(await page.evaluate(() => !!navigator.serviceWorker.controller))) await page.reload();
+  const shareUrl = await page.evaluate(async () => {
+    const fd = new FormData();
+    fd.append('title', 'Receipt');
+    fd.append('files', new File(['total: 42'], 'receipt.txt', { type: 'text/plain' }));
+    return (await fetch('share-target', { method: 'POST', body: fd })).url;
+  });
+  assert.match(shareUrl, /\?shared=/);
+  await page.goto(shareUrl);
+  await page.waitForSelector('#ref-dialog[open]');
+  assert.match(await page.textContent('#ref-form .ref-filename'), /receipt\.txt/);
+  await page.click('#ref-form .btn.primary');
+  await page.waitForFunction(() => /receipt/.test(document.querySelector('#ref-list')?.textContent));
+  const linkUrl = await page.evaluate(async () => {
+    const fd = new FormData();
+    fd.append('text', 'Great article https://example.org/read');
+    return (await fetch('share-target', { method: 'POST', body: fd })).url;
+  });
+  await page.goto(linkUrl);
+  await page.waitForSelector('#ref-dialog[open]');
+  assert.equal(await page.inputValue('#ref-form [name="url"]'), 'https://example.org/read');
+  await page.click('[data-action="ref-to-inbox"]');
+  await page.keyboard.press('2');
+  assert.match(await page.textContent('#main'), /Great article/);
+  await ctx.close();
+}
 
 // ---------- Miracle Morning: guided SAVERS with a fake clock ----------
 {

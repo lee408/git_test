@@ -1,6 +1,6 @@
 // Local-first persistence. The whole GTD document lives in localStorage on each device;
 // sync.js merges it with the copy in Dropbox.
-import { emptyDoc, normalizeDoc, merge, stamp, uid, purgeTombstones } from './model.js';
+import { emptyDoc, normalizeDoc, merge, stamp, uid, purgeTombstones, isoDay, activationPatch } from './model.js';
 
 const DOC_KEY = 'clearhead.doc.v1';
 const listeners = new Set();
@@ -56,6 +56,9 @@ export const store = {
     return item;
   },
 
+  // Follow-ups released by the most recent completion (for the UI to announce).
+  lastActivated: [],
+
   updateItem(id, patch) {
     const prev = doc.items[id];
     if (!prev) return null;
@@ -64,6 +67,20 @@ export const store = {
     if (patch.done === false) next.completedAt = null;
     if (patch.list === 'waiting' && prev.list !== 'waiting') next.waitingSince = Date.now();
     doc.items[id] = next;
+    this.lastActivated = [];
+    if (patch.done === true && !prev.done) {
+      // Release "then do" follow-ups parked behind this action.
+      for (const f of Object.values(doc.items)) {
+        if (f.deleted || f.done || f.after !== id) continue;
+        doc.items[f.id] = { ...f, ...activationPatch(f, id, isoDay(new Date())), updatedAt: stamp(f) };
+        this.lastActivated.push(doc.items[f.id]);
+      }
+    } else if (patch.done === false && prev.done) {
+      // Undo: park again whatever this completion released and hasn't been done since.
+      for (const f of Object.values(doc.items)) {
+        if (!f.deleted && !f.done && f.activatedBy === id) doc.items[f.id] = { ...f, after: id, activatedBy: null, updatedAt: stamp(f) };
+      }
+    }
     changed();
     return next;
   },
@@ -76,6 +93,10 @@ export const store = {
   deleteItem(id) {
     const prev = doc.items[id];
     if (!prev) return;
+    // Follow-ups of a deleted action become ordinary actions rather than vanishing.
+    for (const f of Object.values(doc.items)) {
+      if (!f.deleted && f.after === id) doc.items[f.id] = { ...f, after: null, updatedAt: stamp(f) };
+    }
     doc.items[id] = { id, deleted: true, updatedAt: stamp(prev) };
     changed();
   },
@@ -112,6 +133,29 @@ export const store = {
     const existing = Object.values(doc.projects).find((p) => !p.deleted && p.title.toLowerCase() === n)
       || Object.values(doc.projects).find((p) => !p.deleted && p.status === 'active' && p.title.toLowerCase().startsWith(n));
     return existing || this.addProject({ title: name.trim() });
+  },
+
+  addRef(fields) {
+    const now = Date.now();
+    const r = { id: uid(), kind: 'note', title: '', url: '', note: '', tags: [], projectId: null, itemId: null, file: null, createdAt: now, ...fields, updatedAt: now };
+    doc.refs[r.id] = r;
+    changed();
+    return r;
+  },
+
+  updateRef(id, patch) {
+    const prev = doc.refs[id];
+    if (!prev || prev.deleted) return null;
+    doc.refs[id] = { ...prev, ...patch, updatedAt: stamp(prev) };
+    changed();
+    return doc.refs[id];
+  },
+
+  deleteRef(id) {
+    const prev = doc.refs[id];
+    if (!prev) return;
+    doc.refs[id] = { id, deleted: true, updatedAt: stamp(prev) };
+    changed();
   },
 
   updateSettings(patch) {

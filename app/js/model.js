@@ -4,7 +4,7 @@ export const LISTS = ['inbox', 'next', 'waiting', 'someday', 'reference'];
 export const DEFAULT_CONTEXTS = ['home', 'office', 'errands', 'computer', 'phone', 'deep', 'admin'];
 export const ENERGY = ['low', 'med', 'high'];
 const TOMBSTONE_TTL_DAYS = 180;
-const COLLECTIONS = ['items', 'projects', 'reviews', 'practice'];
+const COLLECTIONS = ['items', 'projects', 'reviews', 'practice', 'refs'];
 
 export function uid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -18,6 +18,7 @@ export function emptyDoc() {
     projects: {},
     reviews: {},
     practice: {}, // Miracle Morning (SAVERS) days, keyed by YYYY-MM-DD
+    refs: {}, // Reference: links, notes and files (file bytes live in Dropbox)
     settings: { contexts: [...DEFAULT_CONTEXTS], reviewDay: 1, updatedAt: 0 },
   };
 }
@@ -176,8 +177,74 @@ export function live(coll) {
   return Object.values(coll).filter((r) => !r.deleted);
 }
 
+// ---------- relations: "then do" follow-ups ----------
+// A follow-up has `after: <predecessor id>` and stays parked (hidden from every list) until the
+// predecessor is done. `afterOffset` days then sets its start date (actions) or check-back date
+// (waiting-for). Relations may cross projects.
+
+export function isParked(doc, item) {
+  if (!item.after) return false;
+  const pred = doc.items[item.after];
+  return !!pred && !pred.deleted && !pred.done;
+}
+
 export function openItems(doc) {
-  return live(doc.items).filter((i) => !i.done);
+  return live(doc.items).filter((i) => !i.done && !isParked(doc, i));
+}
+
+export function parkedItems(doc) {
+  return live(doc.items).filter((i) => !i.done && isParked(doc, i));
+}
+
+// Open items waiting for `id` to be completed.
+export function followUpsOf(doc, id) {
+  return live(doc.items).filter((i) => !i.done && i.after === id).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+// True if making `itemId` follow `predId` would create a loop (or point at itself).
+export function wouldCycle(doc, itemId, predId) {
+  const seen = new Set();
+  for (let cur = predId; cur; cur = doc.items[cur]?.after) {
+    if (cur === itemId || seen.has(cur)) return true;
+    seen.add(cur);
+  }
+  return false;
+}
+
+// What changes on a follow-up when its predecessor is completed.
+export function activationPatch(item, predId, today) {
+  const off = Number(item.afterOffset) || 0;
+  const patch = { after: null, activatedBy: predId };
+  if (item.list === 'waiting') {
+    patch.waitingSince = Date.now();
+    if (off) patch.due = addDays(today, off);
+  } else if (off) {
+    patch.start = addDays(today, off);
+  }
+  return patch;
+}
+
+// ---------- reference ----------
+export function refTags(doc) {
+  const tags = new Map();
+  for (const r of live(doc.refs || {})) for (const t of r.tags || []) tags.set(t.toLowerCase(), t);
+  return [...tags.values()].sort((a, b) => a.localeCompare(b));
+}
+
+export function findRefs(doc, { q = '', tag = null, projectId = null, itemId = null } = {}) {
+  const needle = q.trim().toLowerCase();
+  return live(doc.refs || {}).filter((r) => {
+    if (tag && !(r.tags || []).some((t) => t.toLowerCase() === tag.toLowerCase())) return false;
+    if (projectId && r.projectId !== projectId) return false;
+    if (itemId && r.itemId !== itemId) return false;
+    if (!needle) return true;
+    return [r.title, r.url, r.note, r.file?.name, ...(r.tags || [])].some((f) => String(f || '').toLowerCase().includes(needle));
+  }).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export function parseTags(text) {
+  return [...new Map(String(text || '').split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean)
+    .map((t) => [t.toLowerCase(), t])).values()];
 }
 
 export function isAvailable(item, today) {
@@ -282,6 +349,7 @@ export function merge(a, b) {
     projects: mergeColl(a.projects, b.projects),
     reviews: mergeColl(a.reviews, b.reviews),
     practice: mergeColl(a.practice, b.practice),
+    refs: mergeColl(a.refs, b.refs),
     settings: newer(a.settings, b.settings),
   };
 }
@@ -315,6 +383,7 @@ export function normalizeDoc(raw) {
     projects: raw.projects || {},
     reviews: raw.reviews || {},
     practice: raw.practice || {},
+    refs: raw.refs || {},
     settings: { ...base.settings, ...(raw.settings || {}) },
   };
 }

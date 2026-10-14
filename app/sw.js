@@ -2,8 +2,9 @@
 // Bump VERSION whenever app files change.
 import { buildNotification } from './js/notify.js';
 
-const VERSION = 'clearhead-v6';
+const VERSION = 'clearhead-v7';
 const DATA_CACHE = 'clearhead-data'; // the app's data snapshot, kept across versions
+const KEEP = [DATA_CACHE, 'clearhead-files', 'clearhead-share']; // offline files and pending shares
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/model.js', 'js/store.js', 'js/sync.js', 'js/sweep.js', 'js/calendar.js', 'js/braindump.js',
@@ -17,7 +18,7 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys()
-    .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== DATA_CACHE).map((k) => caches.delete(k))))
+    .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && !KEEP.includes(k)).map((k) => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
@@ -26,6 +27,10 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
+  if (req.method === 'POST' && url.origin === location.origin && url.pathname.endsWith('/share-target')) {
+    e.respondWith(receiveShare(req));
+    return;
+  }
   if (req.method !== 'GET' || url.origin !== location.origin) return;
   const key = req.mode === 'navigate' ? new Request(new URL('./', self.registration.scope)) : req;
   e.respondWith(caches.open(VERSION).then(async (cache) => {
@@ -37,6 +42,24 @@ self.addEventListener('fetch', (e) => {
     return cached || network;
   }));
 });
+
+// Android "Share to Clearhead": park the shared files/text in a cache, then open the app on them.
+async function receiveShare(req) {
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const form = await req.formData();
+    const cache = await caches.open('clearhead-share');
+    const base = new URL(`__share/${id}/`, self.registration.scope).href;
+    const filesIn = form.getAll('files').filter((f) => f && typeof f !== 'string' && f.size);
+    const meta = { title: form.get('title') || '', text: form.get('text') || '', url: form.get('url') || '', files: [] };
+    for (const [k, f] of filesIn.entries()) {
+      await cache.put(base + k, new Response(f, { headers: { 'Content-Type': f.type || 'application/octet-stream' } }));
+      meta.files.push({ name: f.name || `shared-${k}`, type: f.type || '' });
+    }
+    await cache.put(`${base}meta`, new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
+  } catch { /* fall through to the app */ }
+  return Response.redirect(new URL(`./?shared=${id}`, self.registration.scope).href, 303);
+}
 
 async function loadSnapshot() {
   try {

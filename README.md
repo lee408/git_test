@@ -45,6 +45,38 @@ After you save a dated action, Clearhead offers **Add**. The editor and the Upco
 - **It's one-way and manual:** changing a date later doesn't move the calendar event. The action shows **Calendar out of date** and offers to re-add it; delete the old event yourself. Completing an action doesn't remove its event.
 - You can turn off the "offer after saving" prompt in Settings → Google Calendar, per device.
 
+## Keeping projects moving
+
+**"What's next?"** Whenever you tick off an action that belongs to an active project, Clearhead asks what comes next. You can:
+- Type the next action. Shorthand works, e.g. `@phone ~15m due:fri`.
+- Add a waiting-for: what you're expecting, and from whom.
+- Mark the project complete.
+- Choose *Decide later*. You'll be told if that leaves the project stalled.
+
+**Follow-ups ("when this is done").** In any action's editor, you can queue follow-ups that stay hidden until that action is ticked off:
+- **Then do:** a next action that appears automatically. Optionally it starts *N* days later, e.g. "Email quote to Sam, 2 days after".
+- **Then wait for:** a waiting-for item that appears on completion, with a check-back date *N* days later (7 by default), e.g. "Sam's go-ahead (Sam)".
+- **Queue an existing action:** any open action, in any project or none, can be set to wait behind this one. Loops are prevented.
+
+**How queued follow-ups behave:**
+- They're hidden from Now, Next, Inbox and counts until their trigger is done.
+- You can see them in the project ("Queued") and in Upcoming ("Queued follow-ups"), and on the trigger action as "then N more".
+- Chains work: A, then B, then wait for C.
+- Undoing a completion re-queues what it released. Deleting a trigger releases its follow-ups.
+
+## Reference
+
+The **Reference** tab holds documents, photos, links and notes you may need later. It's in the sidebar, or under More on the phone.
+
+- **Adding things:** *+ Link*, *+ Note*, *+ File*, or *Take photo* on Android. You can also share files, photos, PDFs and links from any Android app into Clearhead; a shared link can go to the Inbox instead.
+- **Organising:** comma-separated tags (filter chips plus a search over titles, notes, file names, links and tags). Link a reference to a **project** (shown on the project page) or an **action** (shown in its editor, with an "N refs" chip).
+- **Where files live:**
+  - Files upload to your Dropbox app folder under `/files/`; titles, tags and links sync with the rest of your data.
+  - Each device downloads a file the first time you open it, and keeps the last 60 opened files for offline use.
+  - Images open in a viewer; other files download and open in your usual app.
+  - Deleting a reference also deletes its file from Dropbox.
+- Dropbox must be connected to add or open files. Links and notes work without it.
+
 ## Miracle Morning (SAVERS)
 
 A guided morning practice based on Hal Elrod's *Miracle Morning*, under **More → Settings → Miracle Morning**. You can start it from the Now prompt, from that settings card, or by tapping its notification.

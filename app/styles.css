@@ -347,3 +347,39 @@ legend { font-size: 14px; color: var(--muted); padding: 0; }
   .breath-circle { width: 110px; height: 110px; }
   .breath-label { margin-top: 8px; }
 }
+
+/* ---------- relations, next-action prompt ---------- */
+.rel { margin: 4px 0 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.rel-h { font-size: 15px; margin: 0 0 6px; }
+.rel-list { list-style: none; padding: 0; margin: 0 0 8px; }
+.rel-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; padding: 6px 10px; margin-bottom: 4px; border-radius: 8px; background: var(--surface-2); font-size: 14px; }
+.rel-add, .rel-link { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.rel-add input[name="relTitle"] { flex: 1 1 200px; }
+.rel-add .rel-who { flex: 0 1 140px; }
+.rel-add select, .rel-link select, .rel-add input { width: auto; margin: 0; min-height: 38px; }
+.rel-link select { flex: 1 1 220px; }
+.rel-off { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 13px; }
+.rel-off input { width: 64px !important; }
+.chip.rel { background: var(--accent-soft); color: var(--accent); }
+.np-released { padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); }
+#next-form .label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+#next-form .q { margin-top: 2px; }
+
+/* ---------- reference ---------- */
+.ref-add { margin: 0 0 12px; }
+.ref-tools { margin-bottom: 12px; }
+.ref-tools input[type=search] { margin-bottom: 6px; }
+.refs { list-style: none; padding: 0; margin: 0 0 12px; }
+.ref { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 8px; padding: 6px 10px 6px 4px; margin-bottom: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.ref > .chips { grid-column: 1 / -1; padding: 0 8px 4px 44px; }
+.ref-open { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 8px; border: 0; background: none; text-align: left; cursor: pointer; }
+.ref-open .icon { width: 24px; height: 24px; color: var(--accent); }
+.ref-text { display: flex; flex-direction: column; min-width: 0; }
+.refs.compact .ref { margin-bottom: 4px; }
+.ref-filename { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--surface-2); overflow-wrap: anywhere; }
+.viewer-fig { margin: 0 0 12px; text-align: center; }
+.viewer-fig img { max-width: 100%; max-height: 70vh; border-radius: 8px; }
+.viewer-fig figcaption { color: var(--muted); font-size: 14px; margin-top: 6px; }
+@media (pointer: fine) { .touch-only { display: none; } }
+label.btn { display: inline-flex; margin: 0; color: inherit; font-size: inherit; }
+label.btn.small { font-size: 14px; }

@@ -184,3 +184,47 @@ function schedule(delay = 2500) {
   clearTimeout(timer);
   timer = setTimeout(run, delay);
 }
+
+// ---------- Reference files (stored next to clearhead.json, under /files) ----------
+const DELETE_URL = 'https://api.dropboxapi.com/2/files/delete_v2';
+// HTTP header values must be ASCII, so non-ASCII file names are \u-escaped as Dropbox expects.
+const apiArg = (o) => JSON.stringify(o).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+export const files = {
+  async upload(path, blob) {
+    if (!sync.connected) throw new Error('Connect Dropbox in Settings to store files.');
+    const res = await fetch(UL_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${await accessToken()}`,
+        'Content-Type': 'application/octet-stream',
+        'Dropbox-API-Arg': apiArg({ path, mode: { '.tag': 'add' }, autorename: true, mute: true }),
+      },
+      body: blob,
+    });
+    if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+    const meta = await res.json();
+    return { path: meta.path_display || path, rev: meta.rev, size: meta.size };
+  },
+
+  async download(path) {
+    if (!sync.connected) throw new Error('Connect Dropbox in Settings to open files.');
+    const res = await fetch(DL_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${await accessToken()}`, 'Dropbox-API-Arg': apiArg({ path }) },
+    });
+    if (res.status === 409) throw new Error('That file is no longer in Dropbox.');
+    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    return res.blob();
+  },
+
+  async remove(path) {
+    if (!sync.connected) return;
+    const res = await fetch(DELETE_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${await accessToken()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok && res.status !== 409) throw new Error(`Delete failed (${res.status})`);
+  },
+};
