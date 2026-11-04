@@ -4,7 +4,7 @@ export const LISTS = ['inbox', 'next', 'waiting', 'someday', 'reference'];
 export const DEFAULT_CONTEXTS = ['home', 'office', 'errands', 'computer', 'phone', 'deep', 'admin'];
 export const ENERGY = ['low', 'med', 'high'];
 const TOMBSTONE_TTL_DAYS = 180;
-const COLLECTIONS = ['items', 'projects', 'reviews', 'practice', 'refs'];
+const COLLECTIONS = ['items', 'projects', 'reviews', 'practice', 'refs', 'cats'];
 
 export function uid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
@@ -19,6 +19,7 @@ export function emptyDoc() {
     reviews: {},
     practice: {}, // Miracle Morning (SAVERS) days, keyed by YYYY-MM-DD
     refs: {}, // Reference: links, notes and files (file bytes live in Dropbox)
+    cats: {}, // categories tree: { id, name, parentId }
     settings: { contexts: [...DEFAULT_CONTEXTS], reviewDay: 1, updatedAt: 0 },
   };
 }
@@ -350,6 +351,7 @@ export function merge(a, b) {
     reviews: mergeColl(a.reviews, b.reviews),
     practice: mergeColl(a.practice, b.practice),
     refs: mergeColl(a.refs, b.refs),
+    cats: mergeColl(a.cats, b.cats),
     settings: newer(a.settings, b.settings),
   };
 }
@@ -384,6 +386,7 @@ export function normalizeDoc(raw) {
     reviews: raw.reviews || {},
     practice: raw.practice || {},
     refs: raw.refs || {},
+    cats: raw.cats || {},
     settings: { ...base.settings, ...(raw.settings || {}) },
   };
 }

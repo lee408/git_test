@@ -64,12 +64,30 @@ After you save a dated action, Clearhead offers **Add**. The editor and the Upco
 - Chains work: A, then B, then wait for C.
 - Undoing a completion re-queues what it released. Deleting a trigger releases its follow-ups.
 
+## Categories
+
+Categories group what you capture by area, e.g. *Work › Clients › Acme* or *Home › Garden*. Inbox items, actions, projects and Reference all share one category tree, synced across devices.
+
+- **When capturing:** tap the tag button next to **Add**. The picker lists your categories as a tree.
+  - Tick any number of them.
+  - Search by typing. Enter ticks the exact match.
+  - Type a new name and press Enter (or tap **+ Create**) to make it. `Home/Garden` creates *Garden* inside *Home*, adding any missing levels.
+  - Up to **3 levels** deep.
+- **Where else you can set them:** the action editor, the project page and the Reference form.
+- **Inheritance:** an action with no categories of its own inherits its project's (shown dimmed, with a dashed outline).
+- **Filtering:** **Now**, **Next actions** and **Inbox** share a *Category* filter. Choosing a category includes its sub-categories; *Uncategorised* shows what has none. Reference has its own filter.
+- **Group by category:** on Next actions, switch *Group by* to **Category**. An action with several categories appears under each.
+- **Overview:** the **Categories** page lists every category with its open actions, projects and references. Open one to see everything in it, sub-categories included, or to filter Now/Next/Inbox to it.
+- **Managing:** in **Settings → Categories**, use *Edit* to rename, move under another parent, merge into another category, or delete.
+  - Moves and merges that would go past 3 levels, or put a category inside itself, are refused.
+  - Deleting a category moves its items and sub-categories up one level.
+
 ## Reference
 
 The **Reference** tab holds documents, photos, links and notes you may need later. It's in the sidebar, or under More on the phone.
 
 - **Adding things:** *+ Link*, *+ Note*, *+ File*, or *Take photo* on Android. You can also share files, photos, PDFs and links from any Android app into Clearhead; a shared link can go to the Inbox instead.
-- **Organising:** comma-separated tags (filter chips plus a search over titles, notes, file names, links and tags). Link a reference to a **project** (shown on the project page) or an **action** (shown in its editor, with an "N refs" chip).
+- **Organising:** the same **categories** as your actions and projects (see below), with a category filter and a search over titles, notes, file names, links and category names. Link a reference to a **project** (shown on the project page) or an **action** (shown in its editor, with an "N refs" chip). Tags from earlier versions were turned into top-level categories automatically.
 - **Where files live:**
   - Files upload to your Dropbox app folder under `/files/`; titles, tags and links sync with the rest of your data.
   - Each device downloads a file the first time you open it, and keeps the last 60 opened files for offline use.
@@ -208,6 +226,7 @@ app/js/quotes.js                  205 encouragement quotes
 app/js/notify.js                  builds notification text on the device
 app/js/push.js                    push subscription and per-device reminder settings
 app/js/savers.js                  Miracle Morning steps, presets, breathing and streaks
+app/js/categories.js              category tree, inheritance, filters and tag migration
 worker/clearhead-push.js          Cloudflare Worker that sends scheduled pushes (VAPID + RFC 8291)
 app/js/store.js                   local storage (per device)
 app/js/sync.js                    Dropbox PKCE sign-in + merge-and-upload sync

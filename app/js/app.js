@@ -1,10 +1,14 @@
 import {
   isoDay, addDays, daysBetween, parseCapture, vagueHint, live, openItems, inboxItems, nextActions,
   projectHealth, suggestNow, reviewStatus, isAvailable, normalizeDoc, uid,
-  isParked, parkedItems, followUpsOf, wouldCycle, refTags, findRefs, parseTags,
+  isParked, parkedItems, followUpsOf, wouldCycle, findRefs,
 } from './model.js';
 import { store, prefs } from './store.js';
 import { sync, files } from './sync.js';
+import {
+  MAX_DEPTH, UNCATEGORIZED, catLabel, catTree, childCats, descendants, canMove, splitPath, resolvePath,
+  ownCats, effectiveCats, matchesCat, catStats, searchRefs,
+} from './categories.js';
 import { buildSweep, splitLines } from './sweep.js';
 import { buildBrainDump, TRIAGE, triagePatch } from './braindump.js';
 import { push, saveSnapshot, parseTimes } from './push.js';
@@ -51,6 +55,7 @@ const ICONS = {
   done: '<path d="m5 12 5 5L20 7"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   reference: '<path d="M21 12.5 12.6 21a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.6 8.4"/>',
+  categories: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   note: '<path d="M5 3h10l4 4v14H5z"/><path d="M9 11h6M9 15h6"/>',
   file: '<path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/>',
@@ -68,6 +73,7 @@ const VIEWS = [
   { id: 'waiting', label: 'Waiting for', key: '5' },
   { id: 'someday', label: 'Someday / Maybe', key: '6' },
   { id: 'reference', label: 'Reference', key: 'r' },
+  { id: 'categories', label: 'Categories', key: 'c' },
   { id: 'upcoming', label: 'Upcoming', key: '7' },
   { id: 'review', label: 'Weekly review', key: '8' },
   { id: 'done', label: 'Done', key: '9' },
@@ -87,7 +93,13 @@ const state = {
   pushMsg: '',
   savers: null, // running Miracle Morning session
   refQuery: '',
-  refTag: null,
+  refCat: '',
+  catFilter: prefs.get('catFilter', ''), // Now / Next / Inbox category filter
+  nextGroup: prefs.get('nextGroup', 'context'),
+  captureCats: [],
+  catPick: null,
+  catId: null,
+  catEditId: null,
   refEdit: null, // reference being added or edited
   shareQueue: [],
   nextPromptFor: null,
@@ -95,6 +107,7 @@ const state = {
 if (!VIEWS.some((v) => v.id === state.view) && !['more', 'sweep', 'dump', 'triage', 'savers'].includes(state.view)) state.view = 'now';
 
 function go(view, extra = {}) {
+  if (!('catId' in extra)) state.catId = null;
   Object.assign(state, { view, ...extra });
   if (view !== 'project') prefs.set('view', view);
   if (view !== 'inbox') state.process = null;
@@ -121,6 +134,8 @@ function chips(i, { project = true } = {}) {
     if (ups) out.push(`<span class="chip rel">then ${ups} more</span>`);
     if (isParked(doc(), i)) out.push(`<span class="chip">after: ${esc(doc().items[i.after].title)}</span>`);
   }
+  const own = ownCats(doc(), i);
+  for (const id of own.length ? own : effectiveCats(doc(), i)) out.push(catChip(id, { inherited: !own.length }));
   const nrefs = findRefs(doc(), { itemId: i.id }).length;
   if (nrefs) out.push(`<span class="chip">${nrefs} ref${nrefs > 1 ? 's' : ''}</span>`);
   if (i.cal && !i.done) {
@@ -213,10 +228,11 @@ views.now = () => {
   const d = doc();
   const t = today();
   const ctxs = d.settings.contexts;
-  const blocks = openItems(d).filter((i) => i.schedDate === t && i.schedTime && !['someday', 'reference'].includes(i.list))
+  const blocks = openItems(d).filter((i) => i.schedDate === t && i.schedTime && !['someday', 'reference'].includes(i.list) && inCatFilter(i))
     .sort((a, b) => a.schedTime.localeCompare(b.schedTime));
   const blockIds = new Set(blocks.map((i) => i.id));
-  const suggestions = suggestNow(d, t, state.now).filter((i) => !blockIds.has(i.id));
+  const suggestions = suggestNow(d, t, state.now).filter((i) => !blockIds.has(i.id) && inCatFilter(i));
+  const catSel = catFilterHtml(state.catFilter);
   const shown = state.showAllNow ? suggestions : suggestions.slice(0, NOW_LIMIT);
   const hidden = suggestions.length - shown.length;
   const overdueWaiting = openItems(d).filter((i) => i.list === 'waiting' && Date.now() - (i.waitingSince || i.createdAt) > 7 * 86400000).length;
@@ -234,6 +250,7 @@ views.now = () => {
         ${['low', 'med', 'high'].map((e) => `<button class="pill ${tog(state.now.energy === e)}" data-action="now-energy" data-energy="${e}">${e}</button>`).join('')}
         ${state.now.contexts.length || state.now.timeMin || state.now.energy ? '<button class="link" data-action="now-clear">Clear</button>' : ''}
       </div>
+      ${catSel ? `<div class="filter-row"><span class="filter-label">Category</span>${catSel}</div>` : ''}
     </section>
     ${blocks.length ? `<h2 class="group">Scheduled today <span class="count">${blocks.length}</span></h2>${taskList(blocks)}<h2 class="group">Then, best fits</h2>` : ''}
     ${shown.length ? taskList(shown) : empty(nextActions(d, t).length
@@ -247,11 +264,14 @@ views.now = () => {
 
 views.inbox = () => {
   if (state.process) return processView();
-  const items = inboxItems(doc());
-  const untriaged = items.filter((i) => !i.triaged).length;
+  const all = inboxItems(doc());
+  const items = all.filter(inCatFilter);
+  const untriaged = all.filter((i) => !i.triaged).length;
+  const catSel = catFilterHtml(state.catFilter);
   return `${header('Inbox', 'Capture now, decide later. Process to zero at least once a day.',
     items.length ? `<div class="row">${untriaged >= QUICK_SORT_MIN ? `<button class="btn" data-action="nav" data-view="triage">Quick sort (${untriaged})</button>` : ''}<button class="btn primary" data-action="process-start">Process inbox</button></div>` : '')}
-    ${items.length ? taskList(items) : empty('Inbox zero. Your head is clear.')}`;
+    ${catSel ? `<div class="filter-row"><span class="filter-label">Category</span>${catSel}</div>` : ''}
+    ${items.length ? taskList(items) : empty(all.length ? 'Nothing in this category.' : 'Inbox zero. Your head is clear.')}`;
 };
 
 views.next = () => {
@@ -260,15 +280,28 @@ views.next = () => {
   const all = nextActions(d, t);
   const deferred = nextActions(d, t, { includeDeferred: true }).length - all.length;
   const f = state.nextFilter;
-  const items = f ? all.filter((i) => (f === '_none' ? !i.contexts?.length : i.contexts?.includes(f))) : all;
+  const items = (f ? all.filter((i) => (f === '_none' ? !i.contexts?.length : i.contexts?.includes(f))) : all).filter(inCatFilter);
+  const byCat = state.nextGroup === 'category';
   const groups = new Map();
-  for (const c of d.settings.contexts) groups.set(c, []);
-  groups.set('_none', []);
-  for (const i of items) {
-    const key = i.contexts?.find((c) => groups.has(c)) || (i.contexts?.[0] ?? '_none');
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(i);
+  if (byCat) {
+    // An action with several categories is listed under each of them.
+    for (const { cat } of catTree(d)) groups.set(cat.id, []);
+    groups.set(UNCATEGORIZED, []);
+    for (const i of items) {
+      const cats = effectiveCats(d, i);
+      for (const c of cats.length ? cats : [UNCATEGORIZED]) groups.get(c)?.push(i);
+    }
+  } else {
+    for (const c of d.settings.contexts) groups.set(c, []);
+    groups.set('_none', []);
+    for (const i of items) {
+      const key = i.contexts?.find((c) => groups.has(c)) || (i.contexts?.[0] ?? '_none');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(i);
+    }
   }
+  const groupLabel = (k) => (byCat ? (k === UNCATEGORIZED ? 'Uncategorised' : esc(catLabel(d, k))) : k === '_none' ? 'Anywhere' : `@${esc(k)}`);
+  const catSel = catFilterHtml(state.catFilter);
   const sortItems = (arr) => arr.sort((a, b) => (b.focus - a.focus) || ((a.due || '9') < (b.due || '9') ? -1 : 1) || a.createdAt - b.createdAt);
   return `${header('Next actions', `${plural(all.length, 'action')} you could do now${deferred ? `, plus ${deferred} scheduled for later` : ''}.`)}
     <div class="filter-row">
@@ -276,7 +309,10 @@ views.next = () => {
       ${d.settings.contexts.map((c) => `<button class="pill ${f === c ? 'on' : ''}" data-action="next-filter" data-ctx="${esc(c)}">@${esc(c)}</button>`).join('')}
       <button class="pill ${f === '_none' ? 'on' : ''}" data-action="next-filter" data-ctx="_none">No context</button>
     </div>
-    ${[...groups].filter(([, arr]) => arr.length).map(([c, arr]) => `<h2 class="group">${c === '_none' ? 'Anywhere' : '@' + esc(c)} <span class="count">${arr.length}</span></h2>${taskList(sortItems(arr))}`).join('')
+    <div class="filter-row">${catSel}<span class="filter-label grow">Group by</span>
+      <button class="pill ${byCat ? '' : 'on'}" data-action="next-group" data-group="context">Context</button>
+      <button class="pill ${byCat ? 'on' : ''}" data-action="next-group" data-group="category">Category</button></div>
+    ${[...groups].filter(([, arr]) => arr.length).map(([c, arr]) => `<h2 class="group">${groupLabel(c)} <span class="count">${arr.length}</span></h2>${taskList(sortItems(arr))}`).join('')
     || empty('No next actions here.')}`;
 };
 
@@ -320,6 +356,8 @@ views.project = () => {
       <input class="title-input" name="title" value="${esc(p.title)}" aria-label="Project name">
       <label>Outcome: what does "done" look like?<textarea name="outcome" rows="2">${esc(p.outcome)}</textarea></label>
       <label>Notes / support material<textarea name="notes" rows="3">${esc(p.notes)}</textarea></label>
+      <div class="cat-field"><span class="cat-field-label">Categories</span><span class="chips">${ownCats(d, p).map((id) => catChip(id, { remove: 'project-cat-x' })).join('') || '<span class="hint">None. Its actions can inherit these.</span>'}</span>
+        <button type="button" class="btn small" data-action="project-cats">Choose…</button></div>
       <div class="row"><button class="btn">Save</button>
         ${p.status !== 'done' ? `<button type="button" class="btn" data-action="project-status" data-status="done">Complete project</button>` : `<button type="button" class="btn" data-action="project-status" data-status="active">Reopen</button>`}
         ${p.status === 'active' ? `<button type="button" class="btn" data-action="project-status" data-status="someday">Move to Someday</button>` : ''}
@@ -840,7 +878,7 @@ views.more = () => {
     review: reviewStatus(d, today()).due ? 'due' : '',
   };
   return `${header('More')}
-    <ul class="menu">${['waiting', 'someday', 'reference', 'upcoming', 'review', 'done', 'settings'].map((id) => {
+    <ul class="menu">${['waiting', 'someday', 'reference', 'categories', 'upcoming', 'review', 'done', 'settings'].map((id) => {
     const v = VIEWS.find((x) => x.id === id);
     return `<li><button data-action="nav" data-view="${id}">${icon(id)}<span>${v.label}</span>${counts[id] ? `<span class="badge ${id === 'review' ? 'warn' : ''}">${counts[id]}</span>` : ''}</button></li>`;
   }).join('')}</ul>`;
@@ -851,6 +889,7 @@ views.settings = () => {
   const st = sync.status;
   const last = sync.lastSync ? new Date(sync.lastSync).toLocaleString() : 'never';
   return `${header('Settings')}
+    ${catsCard()}
     <section class="card"><h2>Contexts</h2>
       <form data-form="contexts"><label>Comma-separated, without the @<input name="contexts" value="${esc(s.contexts.join(', '))}"></label><button class="btn">Save contexts</button></form>
     </section>
@@ -1132,6 +1171,7 @@ function openEditor(id) {
     <div class="row cal-row"><button type="button" class="btn small cal" data-action="editor-cal" data-kind="due">Deadline → Google Calendar</button>
       <button type="button" class="btn small cal" data-action="editor-cal" data-kind="block">Time block → Google Calendar</button></div>
     <p class="hint cal-status">${esc(calendarKinds(i).map((k) => `${k === 'due' ? 'Deadline' : 'Time block'}: ${{ none: 'not in calendar', added: 'added to calendar', outdated: 'calendar out of date' }[calendarState(i, k)]}`).join(' · '))}</p>
+    ${catFieldHtml(i.cats || [], { action: 'editor-cats', inherited: i.projectId && d.projects[i.projectId] && !d.projects[i.projectId].deleted ? ownCats(d, d.projects[i.projectId]) : [] })}
     <fieldset><legend>Contexts</legend><div class="filter-row">${ctxs.map((c) => `<label class="pill-check"><input type="checkbox" name="ctx" value="${esc(c)}" ${i.contexts?.includes(c) ? 'checked' : ''}><span>@${esc(c)}</span></label>`).join('')}</div></fieldset>
     <label class="waiting-field">Waiting on<input name="waitingOn" value="${esc(i.waitingOn || '')}"></label>
     <section class="rel" id="rel-section">${relSection(i)}</section>
@@ -1156,7 +1196,7 @@ function saveEditor(form, { offer = true } = {}) {
     title: f.get('title').trim() || doc().items[id].title, notes: f.get('notes'), list: f.get('list'), projectId: f.get('projectId') || null,
     timeMin, energy: f.get('energy') || null, start: f.get('start') || null, due: f.get('due') || null,
     ...blockFields(f.get('schedDate'), f.get('schedTime')),
-    contexts: f.getAll('ctx'), waitingOn: f.get('waitingOn').trim(),
+    contexts: f.getAll('ctx'), waitingOn: f.get('waitingOn').trim(), cats: csvIds(f.get('cats')),
   });
   $('#editor').close();
   if (offer) offerCalendar(id);
@@ -1303,7 +1343,7 @@ function refRow(r) {
   return `<li class="ref" data-ref="${r.id}">
     <button type="button" class="ref-open" data-action="ref-open">${icon(refKind(r))}<span class="ref-text"><span class="task-title">${esc(r.title || r.file?.name || r.url || 'Untitled')}</span>${meta ? `<span class="task-notes">${meta}</span>` : ''}</span></button>
     <button type="button" class="link ref-edit" data-action="ref-edit">Edit</button>
-    ${(r.tags || []).length || p || it ? `<div class="chips">${(r.tags || []).map((t) => `<span class="chip ctx">#${esc(t)}</span>`).join('')}${p ? `<button type="button" class="chip proj" data-action="open-project" data-pid="${p.id}">${esc(p.title)}</button>` : ''}${it ? `<span class="chip">${esc(it.title)}</span>` : ''}</div>` : ''}
+    ${ownCats(d, r).length || p || it ? `<div class="chips">${ownCats(d, r).map((id) => catChip(id)).join('')}${p ? `<button type="button" class="chip proj" data-action="open-project" data-pid="${p.id}">${esc(p.title)}</button>` : ''}${it ? `<span class="chip">${esc(it.title)}</span>` : ''}</div>` : ''}
   </li>`;
 }
 
@@ -1321,19 +1361,18 @@ function itemRefsSection(i) {
 }
 
 function refListHtml() {
-  const refs = findRefs(doc(), { q: state.refQuery, tag: state.refTag });
+  const refs = searchRefs(doc(), { q: state.refQuery, cat: state.refCat });
   return refs.length ? `<ul class="refs">${refs.map(refRow).join('')}</ul>`
-    : empty(state.refQuery || state.refTag ? 'Nothing matches.' : 'Nothing here yet. Add a link, a note, a file or a photo.');
+    : empty(state.refQuery || state.refCat ? 'Nothing matches.' : 'Nothing here yet. Add a link, a note, a file or a photo.');
 }
 
 views.reference = () => {
   const d = doc();
-  const tags = refTags(d);
   const legacy = openItems(d).filter((i) => i.list === 'reference');
   return `${header('Reference', `Documents, photos, links and notes you may need later. Files are kept in your Dropbox; once opened they stay available offline on this device.${sync.connected ? '' : ' <strong>Connect Dropbox in Settings to add files.</strong>'}`)}
     ${refAddBar()}
     <div class="ref-tools"><input type="search" id="ref-search" placeholder="Search reference…" value="${esc(state.refQuery)}" aria-label="Search reference" autocomplete="off">
-      ${tags.length ? `<div class="filter-row">${['', ...tags].map((t) => `<button class="pill ${(state.refTag || '') === t ? 'on' : ''}" data-action="ref-tag" data-tag="${esc(t)}">${t ? `#${esc(t)}` : 'All'}</button>`).join('')}</div>` : ''}</div>
+      ${catTree(d).length ? `<div class="filter-row"><span class="filter-label">Category</span>${catFilterHtml(state.refCat, 'ref-cat')}</div>` : ''}</div>
     <div id="ref-list">${refListHtml()}</div>
     ${legacy.length ? `<h2 class="group">Reference notes from your inbox</h2>${taskList(legacy)}` : ''}`;
 };
@@ -1352,8 +1391,7 @@ function openRefDialog({ ref = null, kind = ref?.kind || 'note', file = null, pr
     <label>Title<input name="title" value="${esc(r.title || (file ? file.name.replace(/\.[^.]+$/, '') : ''))}" ${kind === 'note' ? 'required' : ''} autocomplete="off"></label>
     ${kind === 'link' ? `<label>Address<input name="url" required value="${esc(r.url)}" placeholder="https://…" inputmode="url" autocomplete="off"></label>` : ''}
     <label>${kind === 'note' ? 'Note' : 'Notes'}<textarea name="note" rows="${kind === 'note' ? 8 : 3}">${esc(r.note)}</textarea></label>
-    <label>Tags (comma-separated)<input name="tags" value="${esc((r.tags || []).join(', '))}" list="ref-tag-list" placeholder="e.g. Finance, Car" autocomplete="off"></label>
-    <datalist id="ref-tag-list">${refTags(d).map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
+    ${catFieldHtml(r.cats || [], { action: 'ref-cats' })}
     <label>Project<select name="projectId"><option value="">None</option>${projects.map((p) => `<option value="${p.id}" ${r.projectId === p.id ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}</select></label>
     ${item ? `<p class="hint">Attached to action: <strong>${esc(item.title)}</strong></p>` : ''}
     ${shared && !file ? '<p><button type="button" class="link" data-action="ref-to-inbox">Send to Inbox instead</button></p>' : ''}
@@ -1366,7 +1404,7 @@ function openRefDialog({ ref = null, kind = ref?.kind || 'note', file = null, pr
 async function saveRef(form) {
   const st = state.refEdit;
   const f = form.elements;
-  const fields = { title: f.title.value.trim(), note: f.note.value, tags: parseTags(f.tags.value), projectId: f.projectId.value || null };
+  const fields = { title: f.title.value.trim(), note: f.note.value, cats: csvIds(f.cats.value), projectId: f.projectId.value || null };
   if (st.kind === 'link') {
     let url = f.url.value.trim();
     if (!/^[a-z][\w+.-]*:/i.test(url)) url = `https://${url}`;
@@ -1437,6 +1475,172 @@ function nextShare() {
   if (s) openRefDialog({ kind: s.kind, file: s.file, prefill: s.prefill, shared: s });
 }
 
+// ---------- categories: picker, chips, filter, overview and management ----------
+const csvIds = (v) => String(v || '').split(',').filter(Boolean);
+const liveCat = (id) => (doc().cats?.[id] && !doc().cats[id].deleted ? doc().cats[id] : null);
+
+function catChip(id, { remove = '', inherited = false } = {}) {
+  if (!liveCat(id)) return '';
+  const label = catLabel(doc(), id);
+  return `<span class="chip cat${inherited ? ' inherited' : ''}" title="${esc(inherited ? `${label} (from project)` : label)}">${esc(label)}${remove
+    ? `<button type="button" class="chip-x" data-action="${remove}" data-cid="${id}" aria-label="Remove ${esc(label)}">×</button>` : ''}</span>`;
+}
+
+function catFilterHtml(value, action = 'cat-filter') {
+  const tree = catTree(doc());
+  if (!tree.length) return '';
+  return `<select class="cat-filter${value ? ' on' : ''}" data-action="${action}" aria-label="Filter by category">
+    <option value="">All categories</option><option value="${UNCATEGORIZED}" ${value === UNCATEGORIZED ? 'selected' : ''}>Uncategorised</option>
+    ${tree.map(({ cat, depth }) => `<option value="${cat.id}" ${value === cat.id ? 'selected' : ''}>${' '.repeat(depth - 1)}${esc(cat.name)}</option>`).join('')}</select>`;
+}
+
+const inCatFilter = (x) => matchesCat(doc(), x, state.catFilter);
+
+// The picker: search, tick any number of categories, or create a new one (Parent/Child).
+function openCatPicker({ selected = [], title = 'Categories', onDone }) {
+  state.catPick = { selected: new Set(selected.filter(liveCat)), onDone, q: '' };
+  $('#cat-picker').innerHTML = `<h2 class="q">${esc(title)}</h2>
+    <input id="cat-q" type="search" placeholder="Search or create… (Home/Garden makes a sub-category)" autocomplete="off" aria-label="Search or create a category">
+    <div id="cat-results">${catPickerResults()}</div>
+    <div class="row end"><button type="button" class="btn" data-action="cat-clear">Clear</button><span class="spacer"></span>
+      <button type="button" class="btn" data-action="cat-cancel">Cancel</button><button type="button" class="btn primary" data-action="cat-done">Done</button></div>`;
+  $('#cat-dialog').showModal();
+  if (matchMedia('(pointer: fine)').matches) $('#cat-q').focus();
+}
+
+function catPickerResults() {
+  const d = doc();
+  const pk = state.catPick;
+  const q = pk.q.trim();
+  const needle = q.toLowerCase();
+  const tree = catTree(d);
+  const shown = q ? tree.filter(({ cat }) => catLabel(d, cat.id).toLowerCase().includes(needle)) : tree;
+  const rows = shown.map(({ cat, depth }) => `<label class="cat-row d${q ? 1 : depth}">
+      <input type="checkbox" data-action="cat-toggle" value="${cat.id}" ${pk.selected.has(cat.id) ? 'checked' : ''}>
+      <span class="cat-name">${esc(cat.name)}</span>${q && cat.parentId && liveCat(cat.parentId) ? `<small>${esc(catLabel(d, cat.parentId))}</small>` : ''}</label>`).join('');
+  const names = splitPath(q);
+  let create = '';
+  if (names.length && resolvePath(d, names).missing.length) {
+    create = names.length > MAX_DEPTH
+      ? `<p class="hint bad-text">Categories go ${MAX_DEPTH} levels deep at most.</p>`
+      : `<button type="button" class="btn small cat-create" data-action="cat-create">+ Create “${esc(names.join(' › '))}”</button>`;
+  }
+  const picked = [...pk.selected].filter(liveCat);
+  return `${picked.length ? `<div class="chips cat-picked">${picked.map((id) => catChip(id, { remove: 'cat-unpick' })).join('')}</div>` : ''}
+    ${create}${rows ? `<div class="cat-list">${rows}</div>` : q ? '' : empty('No categories yet. Type a name above to create one; use / for a sub-category, e.g. Home/Garden.')}`;
+}
+
+function refreshCatPicker() {
+  if (state.catPick) $('#cat-results').innerHTML = catPickerResults();
+}
+
+// Category field for forms (editor, reference): chips + Choose…, values in a hidden input.
+function catFieldHtml(ids, { action, inherited = [] }) {
+  const own = ids.filter(liveCat);
+  return `<div class="cat-field"><span class="cat-field-label">Categories</span>
+    <span class="chips">${own.map((id) => catChip(id, { remove: `${action}-x` })).join('')}
+      ${!own.length && inherited.length ? inherited.map((id) => catChip(id, { inherited: true })).join('') : ''}
+      ${!own.length && !inherited.length ? '<span class="hint">None</span>' : ''}</span>
+    <button type="button" class="btn small" data-action="${action}">Choose…</button>
+    <input type="hidden" name="cats" value="${own.join(',')}"></div>`;
+}
+
+function setFieldCats(form, ids, action, inherited = []) {
+  form.querySelector('.cat-field').outerHTML = catFieldHtml(ids, { action, inherited });
+}
+
+const editorInherited = () => {
+  const f = $('#editor-form');
+  const p = doc().projects[f.elements.projectId.value];
+  return p && !p.deleted ? (p.cats || []).filter(liveCat) : [];
+};
+
+views.categories = () => {
+  const d = doc();
+  if (state.catId && (state.catId === UNCATEGORIZED || liveCat(state.catId))) return categoryDetail(state.catId);
+  const tree = catTree(d);
+  const statLine = (s) => [s.actions && plural(s.actions, 'open action'), s.projects && plural(s.projects, 'project'), s.refs && plural(s.refs, 'reference')].filter(Boolean).join(' · ') || 'Empty';
+  return `${header('Categories', 'The areas your actions, projects and reference belong to. Open one to see everything in it, sub-categories included.')}
+    <form class="inline-add" data-form="cat-new"><input name="path" placeholder="New category, e.g. Home/Garden" aria-label="New category"><button class="btn primary">Add</button></form>
+    ${tree.length ? `<ul class="cat-tree">${tree.map(({ cat, depth }) => `<li class="d${depth}"><button class="cat-open" data-action="cat-open" data-cid="${cat.id}">
+        <span class="task-title">${esc(cat.name)}</span><span class="task-notes">${statLine(catStats(d, cat.id))}</span></button></li>`).join('')}
+      <li class="d1"><button class="cat-open muted" data-action="cat-open" data-cid="${UNCATEGORIZED}"><span class="task-title">Uncategorised</span><span class="task-notes">${statLine(catStats(d, UNCATEGORIZED))}</span></button></li></ul>`
+    : empty('No categories yet. Add one above, or use the Category button when you capture.')}
+    <p class="hint">Rename, move, merge or delete categories in <button class="link" data-action="nav" data-view="settings">Settings</button>.</p>`;
+};
+
+function categoryDetail(id) {
+  const d = doc();
+  const t = today();
+  const inCat = (x) => matchesCat(d, x, id);
+  const open = openItems(d).filter(inCat);
+  const nexts = nextActions(d, t).filter(inCat);
+  const nextIds = new Set(nexts.map((i) => i.id));
+  const later = open.filter((i) => i.list === 'next' && !nextIds.has(i.id));
+  const waiting = open.filter((i) => i.list === 'waiting');
+  const inbox = open.filter((i) => i.list === 'inbox');
+  const someday = open.filter((i) => i.list === 'someday');
+  const projects = live(d.projects).filter((p) => p.status !== 'done' && inCat(p)).sort((a, b) => a.title.localeCompare(b.title));
+  const refs = searchRefs(d, { cat: id });
+  const isNone = id === UNCATEGORIZED;
+  const subs = isNone ? [] : childCats(d, id);
+  const parent = !isNone && liveCat(d.cats[id].parentId) ? d.cats[id].parentId : null;
+  const section = (title, items) => (items.length ? `<h2 class="group">${title} <span class="count">${items.length}</span></h2>${taskList(items)}` : '');
+  return `<button class="link back" data-action="cat-open" data-cid="${parent || ''}">← ${parent ? esc(catLabel(d, parent)) : 'Categories'}</button>
+    ${header(isNone ? 'Uncategorised' : esc(catLabel(d, id)), isNone ? 'Open things with no category yet.' : 'Everything here and in its sub-categories.')}
+    ${subs.length ? `<div class="filter-row">${subs.map((c) => `<button class="pill" data-action="cat-open" data-cid="${c.id}">${esc(c.name)}</button>`).join('')}</div>` : ''}
+    <div class="row"><button class="btn small" data-action="cat-show-next" data-cid="${id}">Show only this in Now, Next & Inbox</button></div>
+    ${section('Next actions', nexts)}${section('Waiting for', waiting)}${section('Inbox', inbox)}${section('Scheduled for later', later)}
+    ${projects.length ? `<h2 class="group">Projects <span class="count">${projects.length}</span></h2><ul class="projects">${projects.map((p) => `<li class="project"><button class="project-main" data-action="open-project" data-pid="${p.id}"><span class="task-title">${esc(p.title)}</span>${p.outcome ? `<span class="task-notes">${esc(p.outcome)}</span>` : ''}</button></li>`).join('')}</ul>` : ''}
+    ${refs.length ? `<h2 class="group">Reference <span class="count">${refs.length}</span></h2><ul class="refs">${refs.map(refRow).join('')}</ul>` : ''}
+    ${section('Someday / Maybe', someday)}
+    ${!nexts.length && !waiting.length && !inbox.length && !later.length && !projects.length && !refs.length && !someday.length ? empty('Nothing here yet.') : ''}`;
+}
+
+function catsCard() {
+  const d = doc();
+  const tree = catTree(d);
+  return `<section class="card" id="cat-settings"><h2>Categories</h2>
+    <p class="hint">Up to ${MAX_DEPTH} levels. Deleting a category moves its items and sub-categories up a level.</p>
+    <form class="inline-add" data-form="cat-new"><input name="path" placeholder="New category, e.g. Work/Clients" aria-label="New category"><button class="btn">Add</button></form>
+    ${tree.length ? `<ul class="cat-tree manage">${tree.map(({ cat, depth }) => `<li class="d${depth}"><span>${esc(cat.name)}</span><button type="button" class="link" data-action="cat-edit" data-cid="${cat.id}">Edit</button></li>`).join('')}</ul>` : ''}
+  </section>`;
+}
+
+function openCatEdit(id) {
+  const d = doc();
+  const c = liveCat(id);
+  if (!c) return;
+  state.catEditId = id;
+  const within = descendants(d, id);
+  const tree = catTree(d);
+  $('#cat-edit-form').innerHTML = `<h2 class="q">Edit category</h2><p class="hint">${esc(catLabel(d, id))}</p>
+    <label>Name<input name="name" value="${esc(c.name)}" required autocomplete="off"></label>
+    <label>Inside<select name="parent"><option value="">(top level)</option>${tree.filter(({ cat }) => cat.id === c.parentId || canMove(d, id, cat.id))
+    .map(({ cat, depth }) => `<option value="${cat.id}" ${cat.id === c.parentId ? 'selected' : ''}>${' '.repeat(depth - 1)}${esc(cat.name)}</option>`).join('')}</select></label>
+    <div class="row"><select name="into" aria-label="Merge into"><option value="">Merge into…</option>${tree.filter(({ cat }) => !within.has(cat.id))
+    .map(({ cat }) => `<option value="${cat.id}">${esc(catLabel(d, cat.id))}</option>`).join('')}</select>
+      <button type="button" class="btn small" data-action="catedit-merge">Merge</button></div>
+    <p class="cat-edit-status bad-text" aria-live="polite"></p>
+    <div class="row end"><button type="button" class="btn danger" data-action="catedit-delete">Delete</button><span class="spacer"></span>
+      <button type="button" class="btn" data-action="catedit-cancel">Cancel</button><button class="btn primary">Save</button></div>`;
+  $('#cat-edit-dialog').showModal();
+}
+
+function saveCatEdit(form) {
+  const id = state.catEditId;
+  const f = form.elements;
+  try {
+    const c = liveCat(id);
+    if (f.name.value.trim() !== c.name) store.renameCat(id, f.name.value);
+    if ((f.parent.value || null) !== (c.parentId || null)) store.moveCat(id, f.parent.value || null);
+    $('#cat-edit-dialog').close();
+    toast('Category saved');
+  } catch (e) {
+    form.querySelector('.cat-edit-status').textContent = e.message;
+  }
+}
+
 // ---------- capture ----------
 function capturePreview() {
   const v = $('#capture-input').value;
@@ -1449,16 +1653,21 @@ function capturePreview() {
   if (p.start) bits.push(`starts ${esc(fmtDay(p.start))}`);
   if (p.due) bits.push(`due ${esc(fmtDay(p.due))}`);
   if (p.schedTime) bits.push(`block ${esc(fmtDay(p.schedDate))} ${esc(p.schedTime)}`);
-  $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('');
+  state.captureCats = state.captureCats.filter(liveCat);
+  $('#capture-preview').innerHTML = bits.map((b) => `<span class="chip">${b}</span>`).join('')
+    + state.captureCats.map((id) => catChip(id, { remove: 'capture-cat-x' })).join('');
+  const n = state.captureCats.length;
+  $('#capture-cats').innerHTML = `${icon('categories')}${n ? `<span class="badge">${n}</span>` : ''}`;
+  $('#capture-cats').setAttribute('aria-label', n ? `Categories: ${state.captureCats.map((id) => catLabel(doc(), id)).join(', ')}` : 'Add categories');
 }
 
-function capture(text, notes = '', { projectId: defaultProject = null, src = null } = {}) {
+function capture(text, notes = '', { projectId: defaultProject = null, src = null, cats = [] } = {}) {
   const p = parseCapture(text, today());
   if (!p.title) return null;
   const projectId = p.project ? store.findOrCreateProject(p.project).id : defaultProject;
   return store.addItem({
     title: p.title, notes, contexts: p.contexts, projectId, timeMin: p.timeMin, energy: p.energy, due: p.due, start: p.start,
-    schedDate: p.schedDate, schedTime: p.schedTime, ...(src ? { src } : {}),
+    schedDate: p.schedDate, schedTime: p.schedTime, ...(src ? { src } : {}), cats: cats.filter(liveCat),
   });
 }
 
@@ -1571,7 +1780,6 @@ const actions = {
     toast('Follow-up removed', () => { store.restoreItem(before); refreshEditorParts(); });
   },
   'ref-new': (el) => openRefDialog({ kind: el.dataset.kind, projectId: el.dataset.pid, itemId: el.dataset.iid }),
-  'ref-tag': (el) => { state.refTag = el.dataset.tag || null; render(); },
   'ref-edit': (el) => openRefDialog({ ref: doc().refs[el.closest('[data-ref]').dataset.ref] }),
   'ref-open': (el) => {
     const r = doc().refs[el.closest('[data-ref]').dataset.ref];
@@ -1600,6 +1808,73 @@ const actions = {
     toast('Captured to Inbox');
   },
   'viewer-close': () => $('#viewer').close(),
+  'capture-cats': () => openCatPicker({ selected: state.captureCats, title: 'Categories for this capture', onDone: (ids) => { state.captureCats = ids; capturePreview(); } }),
+  'capture-cat-x': (el) => { state.captureCats = state.captureCats.filter((c) => c !== el.dataset.cid); capturePreview(); },
+  'editor-cats': () => {
+    const form = $('#editor-form');
+    openCatPicker({ selected: csvIds(form.elements.cats.value), onDone: (ids) => setFieldCats(form, ids, 'editor-cats', editorInherited()) });
+  },
+  'editor-cats-x': (el) => {
+    const form = $('#editor-form');
+    setFieldCats(form, csvIds(form.elements.cats.value).filter((c) => c !== el.dataset.cid), 'editor-cats', editorInherited());
+  },
+  'ref-cats': () => {
+    const form = $('#ref-form');
+    openCatPicker({ selected: csvIds(form.elements.cats.value), onDone: (ids) => setFieldCats(form, ids, 'ref-cats') });
+  },
+  'ref-cats-x': (el) => {
+    const form = $('#ref-form');
+    setFieldCats(form, csvIds(form.elements.cats.value).filter((c) => c !== el.dataset.cid), 'ref-cats');
+  },
+  'project-cats': () => {
+    const p = doc().projects[state.projectId];
+    openCatPicker({ selected: p.cats || [], title: `Categories for ${p.title}`, onDone: (ids) => store.updateProject(p.id, { cats: ids }) });
+  },
+  'project-cat-x': (el) => {
+    const p = doc().projects[state.projectId];
+    store.updateProject(p.id, { cats: (p.cats || []).filter((c) => c !== el.dataset.cid) });
+  },
+  'cat-unpick': (el) => { state.catPick.selected.delete(el.dataset.cid); refreshCatPicker(); },
+  'cat-create': () => {
+    const pk = state.catPick;
+    try {
+      const id = store.ensureCatPath(splitPath(pk.q));
+      pk.selected.add(id);
+      pk.q = '';
+      $('#cat-q').value = '';
+      refreshCatPicker();
+    } catch (e) { toast(e.message); }
+  },
+  'cat-clear': () => { state.catPick.selected.clear(); refreshCatPicker(); },
+  'cat-cancel': () => $('#cat-dialog').close(),
+  'cat-done': () => {
+    const pk = state.catPick;
+    const ids = [...pk.selected].filter(liveCat);
+    $('#cat-dialog').close();
+    pk.onDone?.(ids);
+  },
+  'cat-open': (el) => { state.catId = el.dataset.cid || null; state.view = 'categories'; render(); window.scrollTo(0, 0); },
+  'cat-show-next': (el) => { state.catFilter = el.dataset.cid; prefs.set('catFilter', state.catFilter); go('next'); },
+  'next-group': (el) => { state.nextGroup = el.dataset.group; prefs.set('nextGroup', state.nextGroup); render(); },
+  'cat-edit': (el) => openCatEdit(el.dataset.cid),
+  'catedit-cancel': () => $('#cat-edit-dialog').close(),
+  'catedit-merge': () => {
+    const form = $('#cat-edit-form');
+    const into = form.elements.into.value;
+    if (!into) return;
+    const from = state.catEditId;
+    if (!confirm(`Merge "${catLabel(doc(), from)}" into "${catLabel(doc(), into)}"? Everything in it moves across.`)) return;
+    try { store.mergeCat(from, into); $('#cat-edit-dialog').close(); toast('Merged'); } catch (e) { form.querySelector('.cat-edit-status').textContent = e.message; }
+  },
+  'catedit-delete': () => {
+    const id = state.catEditId;
+    const c = doc().cats[id];
+    const up = c.parentId && liveCat(c.parentId) ? `"${catLabel(doc(), c.parentId)}"` : 'uncategorised / top level';
+    if (!confirm(`Delete "${catLabel(doc(), id)}"? Its items and sub-categories move up to ${up}.`)) return;
+    store.deleteCat(id);
+    $('#cat-edit-dialog').close();
+    toast('Category deleted');
+  },
   'toggle-focus': (el, id) => store.updateItem(id, { focus: !doc().items[id].focus }),
   edit: (el, id) => openEditor(id),
   'now-ctx': (el) => {
@@ -1760,6 +2035,18 @@ document.addEventListener('change', (e) => {
     const checks = { ...reviewChecks(rs.periodStart), [el.dataset.step]: el.checked };
     prefs.set('reviewChecks', { period: rs.periodStart, done: checks });
     render();
+  } else if (el.dataset.action === 'cat-toggle') {
+    if (el.checked) state.catPick.selected.add(el.value); else state.catPick.selected.delete(el.value);
+    refreshCatPicker();
+  } else if (el.dataset.action === 'cat-filter') {
+    state.catFilter = el.value;
+    prefs.set('catFilter', state.catFilter);
+    render();
+  } else if (el.dataset.action === 'ref-cat') {
+    state.refCat = el.value;
+    render();
+  } else if (el.closest('#editor-form') && el.name === 'projectId' && !csvIds(el.form.elements.cats.value).length) {
+    setFieldCats(el.form, [], 'editor-cats', editorInherited());
   } else if (el.dataset.action === 'ref-file') {
     const file = el.files[0];
     el.value = '';
@@ -1789,6 +2076,7 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (el.id === 'capture-input') capturePreview();
+  if (el.id === 'cat-q' && state.catPick) { state.catPick.q = el.value; refreshCatPicker(); }
   if (el.id === 'ref-search') { state.refQuery = el.value; $('#ref-list').innerHTML = refListHtml(); }
   if (el.hasAttribute('data-vague')) {
     const hint = el.closest('form, .wizard')?.querySelector('.vague-hint');
@@ -1809,9 +2097,10 @@ document.addEventListener('submit', (e) => {
   e.preventDefault();
   if (form.id === 'capture') {
     const input = $('#capture-input');
-    const item = capture(input.value);
+    const item = capture(input.value, '', { cats: state.captureCats });
     if (!item) return;
     input.value = '';
+    state.captureCats = [];
     capturePreview();
     toast('Captured to Inbox', () => store.deleteItem(item.id));
     return;
@@ -1819,6 +2108,7 @@ document.addEventListener('submit', (e) => {
   if (form.id === 'editor-form') { saveEditor(form); return; }
   if (form.id === 'next-form') { saveNextPrompt(form); return; }
   if (form.id === 'ref-form') { saveRef(form); return; }
+  if (form.id === 'cat-edit-form') { saveCatEdit(form); return; }
   const kind = form.dataset.form;
   const val = (n) => form.elements[n]?.value.trim() ?? '';
   if (kind === 'new-project') {
@@ -1843,6 +2133,12 @@ document.addEventListener('submit', (e) => {
     state.now.contexts = state.now.contexts.filter((c) => list.includes(c));
     prefs.set('nowCtx', state.now);
     toast('Contexts saved');
+  } else if (kind === 'cat-new') {
+    try {
+      store.ensureCatPath(splitPath(val('path')));
+      form.reset();
+      toast('Category added');
+    } catch (err) { toast(err.message); }
   } else if (kind === 'savers-insight') {
     const item = capture(val('title'), '', { src: 'Miracle Morning' });
     if (item) { state.savers.captured++; form.reset(); toast('Parked in your inbox. Back to it.'); }
@@ -1892,6 +2188,22 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'walk-text' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); walkMove(e.target.dataset.walk, 1); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (e.key === 'Escape' && e.target.id === 'capture-input') { e.target.blur(); return; }
+  if (e.key === 'Enter' && e.target.id === 'cat-q') {
+    e.preventDefault();
+    if ($('#cat-results .cat-create')) { actions['cat-create'](); return; }
+    // Otherwise tick the exact path typed (e.g. "Work" or "Work/Clients"), or the only match.
+    const { existing, missing } = resolvePath(doc(), splitPath(e.target.value));
+    const exact = !missing.length && existing.at(-1);
+    const boxes = $$('#cat-results input[data-action="cat-toggle"]');
+    const box = exact ? boxes.find((b) => b.value === exact.id) : boxes.length === 1 && boxes[0];
+    if (box) {
+      if (!box.checked) box.click();
+      state.catPick.q = '';
+      e.target.value = '';
+      refreshCatPicker();
+    }
+    return;
+  }
   if (e.key === 'Enter' && e.target.name === 'relTitle') { e.preventDefault(); actions['rel-add'](); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey || $('dialog[open]')) return;
   if (state.view === 'triage') {
@@ -1908,6 +2220,7 @@ document.addEventListener('keydown', (e) => {
 $('#editor').addEventListener('close', () => { state.editingId = null; });
 $('#ref-dialog').addEventListener('close', () => { state.refEdit = null; setTimeout(nextShare, 0); });
 $('#viewer').addEventListener('close', () => { $('#viewer').innerHTML = ''; });
+$('#cat-dialog').addEventListener('close', () => { state.catPick = null; });
 
 // ---------- startup ----------
 store.subscribe(({ local }) => {
@@ -1923,6 +2236,7 @@ sync.onStatus(() => {
 
 async function start() {
   if (!matchMedia('(pointer: fine)').matches) $('#capture-input').placeholder = 'Capture anything…';
+  capturePreview();
   render();
   await sync.handleRedirect().catch((e) => toast(e.message));
   const params = new URLSearchParams(location.search);

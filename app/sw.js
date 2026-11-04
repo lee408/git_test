@@ -2,13 +2,13 @@
 // Bump VERSION whenever app files change.
 import { buildNotification } from './js/notify.js';
 
-const VERSION = 'clearhead-v7';
+const VERSION = 'clearhead-v8';
 const DATA_CACHE = 'clearhead-data'; // the app's data snapshot, kept across versions
 const KEEP = [DATA_CACHE, 'clearhead-files', 'clearhead-share']; // offline files and pending shares
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/model.js', 'js/store.js', 'js/sync.js', 'js/sweep.js', 'js/calendar.js', 'js/braindump.js',
-  'js/quotes.js', 'js/notify.js', 'js/push.js', 'js/savers.js',
+  'js/quotes.js', 'js/notify.js', 'js/push.js', 'js/savers.js', 'js/categories.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

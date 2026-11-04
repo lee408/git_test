@@ -383,3 +383,34 @@ legend { font-size: 14px; color: var(--muted); padding: 0; }
 @media (pointer: fine) { .touch-only { display: none; } }
 label.btn { display: inline-flex; margin: 0; color: inherit; font-size: inherit; }
 label.btn.small { font-size: 14px; }
+
+/* ---------- categories ---------- */
+.cat-btn { height: 48px; min-width: 48px; padding: 0 12px; position: relative; }
+.cat-btn .badge { position: absolute; top: 4px; right: 4px; min-width: 18px; padding: 0 5px; font-size: 11px; background: var(--accent); color: var(--accent-ink); }
+.chip.cat { background: var(--warn-soft); color: var(--text); gap: 4px; }
+.chip.cat.inherited { background: none; border: 1px dashed var(--line); color: var(--muted); }
+.chip-x { border: 0; background: none; padding: 0 0 0 4px; cursor: pointer; color: var(--muted); font-size: 14px; line-height: 1; }
+.chip-x:hover { color: var(--bad); }
+.cat-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.cat-field-label { font-size: 14px; color: var(--muted); min-width: 84px; }
+.cat-field .chips { flex: 1 1 200px; }
+#cat-q { margin-bottom: 10px; }
+.cat-list { max-height: 50vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px 0; }
+.cat-row { display: flex; align-items: center; gap: 10px; margin: 0; padding: 8px 12px; color: var(--text); font-size: 15px; cursor: pointer; }
+.cat-row:hover { background: var(--surface-2); }
+.cat-row input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+.cat-row small { color: var(--muted); margin-left: auto; font-size: 12px; }
+.cat-row.d2, .cat-tree .d2 { padding-left: 34px; }
+.cat-row.d3, .cat-tree .d3 { padding-left: 58px; }
+.cat-picked { margin-bottom: 10px; }
+.cat-create { margin: 0 0 10px; }
+.cat-tree { list-style: none; padding: 0; margin: 0 0 12px; }
+.cat-tree li { margin-bottom: 6px; }
+.cat-open { display: flex; flex-direction: column; width: 100%; padding: 10px 14px; text-align: left; cursor: pointer; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.cat-open.muted .task-title { color: var(--muted); }
+.cat-tree.manage li { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px; margin: 0; border-bottom: 1px solid var(--line); }
+.cat-tree.manage li.d2 { padding-left: 28px; }
+.cat-tree.manage li.d3 { padding-left: 52px; }
+select.cat-filter { width: auto; min-height: 36px; margin: 0; padding: 4px 10px; border-radius: 99px; font-size: 14px; }
+select.cat-filter.on { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.filter-label.grow { width: auto; margin-left: auto; }

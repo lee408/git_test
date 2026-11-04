@@ -93,6 +93,16 @@ async function device(name, viewport) {
   return page;
 }
 const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage: true }); };
+// Opens the category picker via `button`, creates/ticks each path (e.g. 'Home/Garden'), then Done.
+async function pickCats(page, button, paths) {
+  await page.click(button);
+  await page.waitForSelector('#cat-dialog[open]');
+  for (const p of paths) {
+    await page.fill('#cat-q', p);
+    await page.press('#cat-q', 'Enter');
+  }
+  await page.click('[data-action="cat-done"]');
+}
 const capture = async (page, text) => { await page.fill('#capture-input', text); await page.press('#capture-input', 'Enter'); };
 
 // ---------- Device A: Windows desktop ----------
@@ -409,12 +419,13 @@ assert.match(await phone.textContent('#main'), /Article/);
   await page.click('#main [data-action="ref-new"][data-kind="note"]');
   await page.fill('#ref-form [name="title"]', 'Wifi password');
   await page.fill('#ref-form [name="note"]', 'hunter2');
-  await page.fill('#ref-form [name="tags"]', 'Home');
+  await pickCats(page, '#ref-form [data-action="ref-cats"]', ['Home']);
   await page.click('#ref-form .btn.primary');
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
   await page.setInputFiles('#main .ref-add input[data-action="ref-file"]:not([capture])', { name: 'boiler photo.png', mimeType: 'image/png', buffer: png });
   assert.match(await page.textContent('#ref-form .ref-filename'), /boiler photo\.png/);
-  await page.fill('#ref-form [name="tags"]', 'Home, Manuals');
+  await pickCats(page, '#ref-form [data-action="ref-cats"]', ['Home', 'Manuals']);
+  assert.match(await page.textContent('#ref-form .cat-field'), /Home.*Manuals/);
   await page.click('#ref-form .btn.primary');
   await page.waitForFunction(() => document.querySelectorAll('#ref-list .ref').length === 3);
   const uploaded = [...box.files.values()].find((f) => /\/files\/.+boiler photo\.png$/.test(f.path));
@@ -423,7 +434,7 @@ assert.match(await phone.textContent('#main'), /Article/);
   await page.fill('#ref-search', 'wifi');
   assert.equal(await page.locator('#ref-list .ref').count(), 1);
   await page.fill('#ref-search', '');
-  await page.click('[data-action="ref-tag"][data-tag="Manuals"]');
+  await page.selectOption('#main select[data-action="ref-cat"]', { label: 'Manuals' });
   assert.equal(await page.locator('#ref-list .ref').count(), 1);
   await page.click('#ref-list .ref-open');
   await page.waitForFunction(() => document.querySelector('#viewer img')?.naturalWidth === 1);
@@ -438,7 +449,7 @@ assert.match(await phone.textContent('#main'), /Article/);
   await page.click('#ref-list [data-action="ref-edit"]');
   await page.click('[data-action="ref-delete"]');
   assert.deepEqual(box.deleted, [uploaded.path]);
-  await page.click('[data-action="ref-tag"][data-tag=""]');
+  await page.selectOption('#main select[data-action="ref-cat"]', '');
   assert.equal(await page.locator('#ref-list .ref').count(), 2);
   await shot(page, '16-reference');
 
@@ -468,6 +479,110 @@ assert.match(await phone.textContent('#main'), /Article/);
   await page.click('[data-action="ref-to-inbox"]');
   await page.keyboard.press('2');
   assert.match(await page.textContent('#main'), /Great article/);
+  await ctx.close();
+}
+
+// ---------- Categories: capture picker, sub-categories, inheritance, filters, overview, management ----------
+{
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => errors.push(`cats: ${e.message}`));
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`cats: ${m.text()}`); });
+  page.on('dialog', (d) => d.accept());
+  await page.goto(BASE);
+  await page.click('[data-action="dump-dismiss"]');
+  const docNow = () => page.evaluate(() => JSON.parse(localStorage.getItem('clearhead.doc.v1')));
+  const catId = (d, name) => Object.values(d.cats).find((c) => c.name === name && !c.deleted)?.id;
+
+  // Capture with two categories, one a new 3-level path; the picker then offers existing ones.
+  await page.fill('#capture-input', 'Send Acme the invoice @computer');
+  await pickCats(page, '#capture-cats', ['Work/Clients/Acme', 'Finance']);
+  assert.match(await page.textContent('#capture-preview'), /Work › Clients › Acme.*Finance/);
+  assert.equal(await page.textContent('#capture-cats .badge'), '2');
+  await shot(page, '17-capture-categories');
+  await page.press('#capture-input', 'Enter');
+  assert.equal(await page.locator('#capture-cats .badge').count(), 0, 'selection clears after capture');
+  await page.click('#capture-cats');
+  assert.deepEqual(await page.locator('#cat-results .cat-row .cat-name').allTextContents(), ['Finance', 'Work', 'Clients', 'Acme'], 'tree order');
+  await page.fill('#cat-q', 'cli');
+  assert.deepEqual(await page.locator('#cat-results .cat-row .cat-name').allTextContents(), ['Clients', 'Acme'], 'search by path');
+  await page.fill('#cat-q', 'Work/Clients/Acme/Deep');
+  assert.match(await page.textContent('#cat-results'), /3 levels deep at most/);
+  await page.fill('#cat-q', 'Home/Garden');
+  await page.press('#cat-q', 'Enter');
+  await shot(page, '18-category-picker');
+  await page.click('[data-action="cat-done"]');
+  await capture(page, 'Mow the lawn');
+  await capture(page, 'Something unsorted');
+
+  let d = await docNow();
+  const byTitle = (t) => Object.values(d.items).find((i) => i.title === t);
+  assert.deepEqual(byTitle('Send Acme the invoice').cats.sort(), [catId(d, 'Acme'), catId(d, 'Finance')].sort());
+  assert.deepEqual(byTitle('Mow the lawn').cats, [catId(d, 'Garden')]);
+  assert.equal(catId(d, 'Garden') && d.cats[catId(d, 'Garden')].parentId, catId(d, 'Home'));
+
+  // Project categories are inherited by its actions.
+  await page.click('#sidenav [data-view="projects"]');
+  await page.fill('[data-form="new-project"] input', 'Q4 report');
+  await page.press('[data-form="new-project"] input', 'Enter');
+  await pickCats(page, '#main [data-action="project-cats"]', ['Work']);
+  await page.fill('[data-form="project-action"] input', 'Draft Q4 summary');
+  await page.press('[data-form="project-action"] input', 'Enter');
+  assert.match(await page.textContent('#main .task:has-text("Draft Q4 summary") .chip.cat.inherited'), /Work/);
+
+  // Inbox filter includes sub-categories; Uncategorised works.
+  await page.keyboard.press('2');
+  await page.selectOption('#main select[data-action="cat-filter"]', { label: 'Work' });
+  assert.deepEqual(await page.locator('#main .task .task-title').allTextContents(), ['Send Acme the invoice']);
+  await page.selectOption('#main select[data-action="cat-filter"]', '_none');
+  assert.deepEqual(await page.locator('#main .task .task-title').allTextContents(), ['Something unsorted']);
+  await page.selectOption('#main select[data-action="cat-filter"]', '');
+
+  // Next actions grouped by category: the invoice appears under both of its categories.
+  await page.click('#main .task-body >> text=Send Acme the invoice');
+  await page.selectOption('#editor-form [name="list"]', 'next');
+  await page.click('#editor-form .btn.primary');
+  await page.keyboard.press('3');
+  await page.click('[data-action="next-group"][data-group="category"]');
+  const groups = await page.locator('#main h2.group').allTextContents();
+  assert.deepEqual(groups.map((g) => g.replace(/\s*\d+$/, '')), ['Finance', 'Work', 'Work › Clients › Acme']);
+  await page.selectOption('#main select[data-action="cat-filter"]', { label: 'Work' });
+  assert.deepEqual((await page.locator('#main .task .task-title').allTextContents()).sort(), ['Draft Q4 summary', 'Send Acme the invoice', 'Send Acme the invoice'].sort());
+  await shot(page, '19-next-by-category');
+  await page.selectOption('#main select[data-action="cat-filter"]', '');
+
+  // Overview with counts; detail page shows actions, projects and sub-categories.
+  await page.click('#sidenav [data-view="categories"]');
+  assert.match(await page.textContent('#main .cat-tree'), /Work\s*2 open actions · 1 project/);
+  await page.click('[data-action="cat-open"]:has-text("Work")');
+  assert.match(await page.textContent('#main h1'), /^Work$/);
+  assert.match(await page.textContent('#main'), /Q4 report/);
+  assert.match(await page.textContent('#main .filter-row'), /Clients/);
+  await shot(page, '20-category-detail');
+  await page.click('[data-action="cat-show-next"]');
+  assert.match(await page.textContent('#main h1'), /Next actions/);
+  assert.equal(await page.inputValue('#main select[data-action="cat-filter"]'), catId(await docNow(), 'Work'));
+  await page.selectOption('#main select[data-action="cat-filter"]', '');
+
+  // Manage in Settings: rename, move (depth-checked), merge, delete moves items up.
+  await page.click('#sidenav [data-view="settings"]');
+  await page.click('#cat-settings [data-action="cat-edit"] >> nth=0'); // Finance (alphabetical first)
+  await page.fill('#cat-edit-form [name="name"]', 'Money');
+  await page.selectOption('#cat-edit-form [name="parent"]', { label: 'Home' });
+  await page.click('#cat-edit-form .btn.primary');
+  d = await docNow();
+  assert.equal(d.cats[catId(d, 'Money')].parentId, catId(d, 'Home'));
+  await page.click(`#cat-settings [data-action="cat-edit"][data-cid="${catId(d, 'Clients')}"]`);
+  const parentChoices = await page.locator('#cat-edit-form [name="parent"] option').allTextContents();
+  assert.ok(!parentChoices.some((t) => /Garden/.test(t)), 'Clients›Acme cannot go under Home›Garden (4 levels)');
+  await page.selectOption('#cat-edit-form [name="into"]', { label: 'Work' });
+  await page.click('[data-action="catedit-merge"]');
+  d = await docNow();
+  assert.equal(d.cats[catId(d, 'Acme')].parentId, catId(d, 'Work'), 'merged sub-category moves under Work');
+  await page.click(`#cat-settings [data-action="cat-edit"][data-cid="${catId(d, 'Acme')}"]`);
+  await page.click('[data-action="catedit-delete"]');
+  d = await docNow();
+  assert.deepEqual(byTitle('Send Acme the invoice').cats.sort(), [catId(d, 'Money'), catId(d, 'Work')].sort(), 'item moved up to Work');
   await ctx.close();
 }
 

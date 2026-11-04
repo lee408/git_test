@@ -21,6 +21,7 @@
       <form id="capture" class="capture" autocomplete="off">
         <input id="capture-input" enterkeyhint="done" placeholder="Capture anything… (press N)" aria-label="Capture to inbox">
         <button class="btn primary" aria-label="Add to inbox">Add</button>
+        <button type="button" id="capture-cats" class="btn cat-btn" data-action="capture-cats" aria-label="Add categories" title="Categories"></button>
         <button type="button" id="sync-dot" class="sync-dot" data-action="nav" data-view="settings" hidden aria-label="Sync status"></button>
         <div id="capture-preview" class="capture-preview" aria-live="polite"></div>
       </form>
@@ -33,6 +34,8 @@
   <dialog id="next-dialog" aria-label="What's next for this project"><form id="next-form" method="dialog" autocomplete="off"></form></dialog>
   <dialog id="ref-dialog" aria-label="Reference"><form id="ref-form" method="dialog"></form></dialog>
   <dialog id="viewer" aria-label="Image"></dialog>
+  <dialog id="cat-dialog" aria-label="Choose categories"><div id="cat-picker"></div></dialog>
+  <dialog id="cat-edit-dialog" aria-label="Edit category"><form id="cat-edit-form" method="dialog" autocomplete="off"></form></dialog>
   <noscript>Clearhead needs JavaScript.</noscript>
   <script type="module" src="js/app.js"></script>
 </body>

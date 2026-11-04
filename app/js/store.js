@@ -1,10 +1,34 @@
 // Local-first persistence. The whole GTD document lives in localStorage on each device;
 // sync.js merges it with the copy in Dropbox.
 import { emptyDoc, normalizeDoc, merge, stamp, uid, purgeTombstones, isoDay, activationPatch } from './model.js';
+import { MAX_DEPTH, catDepth, canMove, findCatByName, descendants, tagMigration } from './categories.js';
 
 const DOC_KEY = 'clearhead.doc.v1';
 const listeners = new Set();
 let doc = load();
+migrateTags();
+
+// Reference tags (older versions) become categories; returns true if anything changed.
+function migrateTags() {
+  const m = tagMigration(doc);
+  if (!m.refs.length) return false;
+  const now = Date.now();
+  for (const c of m.cats) doc.cats[c.id] = { ...c, createdAt: now, updatedAt: now };
+  for (const { id, cats } of m.refs) doc.refs[id] = { ...doc.refs[id], cats, tags: [], updatedAt: stamp(doc.refs[id]) };
+  persist();
+  return true;
+}
+
+// Replace category `from` with `to` (or drop it when `to` is null) on every item, project and reference.
+function remapCats(from, to) {
+  for (const k of ['items', 'projects', 'refs']) {
+    for (const r of Object.values(doc[k])) {
+      if (r.deleted || !(r.cats || []).includes(from)) continue;
+      const cats = [...new Set(r.cats.map((c) => (c === from ? to : c)).filter(Boolean))];
+      doc[k][r.id] = { ...r, cats, updatedAt: stamp(r) };
+    }
+  }
+}
 
 function load() {
   try {
@@ -35,12 +59,14 @@ export const store = {
   // Merge a document from elsewhere (sync or import). Returns the merged doc.
   mergeIn(other) {
     doc = purgeTombstones(merge(doc, normalizeDoc(other)));
+    if (migrateTags()) { changed(); return doc; }
     changed({ local: false });
     return doc;
   },
 
   replaceAll(other) {
     doc = normalizeDoc(other);
+    migrateTags();
     changed();
   },
 
@@ -155,6 +181,80 @@ export const store = {
     const prev = doc.refs[id];
     if (!prev) return;
     doc.refs[id] = { id, deleted: true, updatedAt: stamp(prev) };
+    changed();
+  },
+
+  // ---------- categories ----------
+  // Finds or creates each level of a path like ['Work', 'Clients']; returns the last id.
+  ensureCatPath(names, parentId = null) {
+    if (catDepth(doc, parentId) + names.length > MAX_DEPTH) throw new Error(`Categories go ${MAX_DEPTH} levels deep at most.`);
+    let created = false;
+    for (const name of names) {
+      let c = findCatByName(doc, name, parentId);
+      if (!c) {
+        const now = Date.now();
+        c = { id: uid(), name: name.trim().slice(0, 60), parentId, createdAt: now, updatedAt: now };
+        doc.cats[c.id] = c;
+        created = true;
+      }
+      parentId = c.id;
+    }
+    if (created) changed();
+    return parentId;
+  },
+
+  renameCat(id, name) {
+    const prev = doc.cats[id];
+    const n = name.trim().slice(0, 60);
+    if (!prev || prev.deleted || !n) return false;
+    const clash = findCatByName(doc, n, prev.parentId || null);
+    if (clash && clash.id !== id) throw new Error(`There's already a "${n}" there. Use Merge instead.`);
+    doc.cats[id] = { ...prev, name: n, updatedAt: stamp(prev) };
+    changed();
+    return true;
+  },
+
+  moveCat(id, parentId) {
+    const prev = doc.cats[id];
+    if (!prev || prev.deleted) return false;
+    if (!canMove(doc, id, parentId || null)) throw new Error(`That would put it inside itself or more than ${MAX_DEPTH} levels deep.`);
+    const clash = findCatByName(doc, prev.name, parentId || null);
+    if (clash && clash.id !== id) throw new Error(`There's already a "${prev.name}" there. Use Merge instead.`);
+    doc.cats[id] = { ...prev, parentId: parentId || null, updatedAt: stamp(prev) };
+    changed();
+    return true;
+  },
+
+  // Everything in `from` moves to `into`; `from`'s sub-categories move under `into`.
+  mergeCat(from, into) {
+    if (from === into || !doc.cats[from] || !doc.cats[into]) return false;
+    if (descendants(doc, from).has(into)) throw new Error('Can\'t merge a category into one of its own sub-categories.');
+    const kids = Object.values(doc.cats).filter((c) => !c.deleted && c.parentId === from);
+    for (const k of kids) if (!canMove(doc, k.id, into)) throw new Error(`Merging would go more than ${MAX_DEPTH} levels deep.`);
+    for (const k of kids) {
+      const clash = findCatByName(doc, k.name, into);
+      if (clash) this.mergeCat(k.id, clash.id);
+      else doc.cats[k.id] = { ...k, parentId: into, updatedAt: stamp(k) };
+    }
+    remapCats(from, into);
+    doc.cats[from] = { id: from, deleted: true, updatedAt: stamp(doc.cats[from]) };
+    changed();
+    return true;
+  },
+
+  // Items and sub-categories move up to the parent (or become uncategorised / top level).
+  deleteCat(id) {
+    const prev = doc.cats[id];
+    if (!prev || prev.deleted) return;
+    const parentId = prev.parentId && doc.cats[prev.parentId] && !doc.cats[prev.parentId].deleted ? prev.parentId : null;
+    for (const k of Object.values(doc.cats)) {
+      if (k.deleted || k.parentId !== id) continue;
+      const clash = findCatByName(doc, k.name, parentId);
+      if (clash && clash.id !== k.id) { this.mergeCat(k.id, clash.id); continue; }
+      doc.cats[k.id] = { ...k, parentId, updatedAt: stamp(k) };
+    }
+    remapCats(id, parentId);
+    doc.cats[id] = { id, deleted: true, updatedAt: stamp(prev) };
     changed();
   },
 
